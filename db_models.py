@@ -1,0 +1,53 @@
+from sqlalchemy import Column, Integer, String, JSON
+from database import Base
+
+# See design.md for datatypes
+
+class DBUser(Base):
+    __tablename__ = "users"
+
+    user_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    username = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+    permissions = Column(JSON)
+    status = Column(String)
+    description = Column(String)
+    profile_picture = Column(String)
+
+class DBServer(Base):
+    __tablename__ = "servers"
+
+    server_id = Column(Integer, primary_key=True, index=True)
+    server_name = Column(String)
+    server_description = Column(String)
+    server_image = Column(String)
+    members = Column(JSON)
+    folders = Column(Integer)
+    channels = Column(Integer)
+
+class DBChannel(Base):
+    __tablename__ = "channels"
+
+    channel_id = Column(Integer, primary_key=True, index=True)
+    server_id = Column(Integer)
+    channel_name = Column(String)
+    channel_type = Column(String)
+    members = Column(JSON)
+
+class DBMessage(Base):
+    __tablename__ = "messages"
+
+    message_id = Column(Integer, primary_key=True, index=True)
+    channel_id = Column(Integer, index=True)
+    author_id = Column(Integer, index=True)
+    
+    content = Column(JSON)
+    mentions = Column(JSON)
+    flags = Column(JSON)
+    reactions = Column(JSON)
+    
+    created_at = Column(Integer)
+    modified_at = Column(Integer)
+    message_type = Column(String)
+    parent_id = Column(Integer)
+    thread_id = Column(Integer)
