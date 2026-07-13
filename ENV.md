@@ -7,7 +7,7 @@ Create a `.env` file in the root directory (or export them in your terminal sess
 | `SECRET_KEY` | Key used for signing JWT access tokens. | `"super-secret-key-..."` | **Recommended in Production** |
 | `JWT_ALGORITHM` | Algorithm used for JWT encoding. | `"HS256"` | No |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | Token lifespan in minutes. | `10080` (1 week) | No |
-| `DATABASE_URL` | SQLAlchemy-compatible database URI connection string. | `"sqlite:///./chat.db"` | No |
+| `DATABASE_URL` | SQLAlchemy-compatible database URI connection string (SQLite or PostgreSQL). | `"sqlite:///./chat.db"` | No |
 | `R2_ACCESS_KEY_ID` | Cloudflare R2 Client Access Key ID. | *None* | Yes (For R2 storage) |
 | `R2_SECRET_ACCESS_KEY` | Cloudflare R2 Client Secret Access Key. | *None* | Yes (For R2 storage) |
 | `R2_ENDPOINT_URL` | Cloudflare R2 Endpoint URL (S3 compatible API). | *None* | Yes (For R2 storage) |
