@@ -61,6 +61,8 @@ function App() {
   const [settingsDescription, setSettingsDescription] = useState('');
   const [settingsProfilePic, setSettingsProfilePic] = useState('');
   const [settingsBanner, setSettingsBanner] = useState('');
+  const [settingsProfilePicFile, setSettingsProfilePicFile] = useState<File | null>(null);
+  const [settingsBannerFile, setSettingsBannerFile] = useState<File | null>(null);
 
   const [showServerSettings, setShowServerSettings] = useState(false);
   const [isSavingServer, setIsSavingServer] = useState(false);
@@ -68,6 +70,8 @@ function App() {
   const [serverDescription, setServerDescription] = useState('');
   const [serverImage, setServerImage] = useState('');
   const [serverBanner, setServerBanner] = useState('');
+  const [serverImageFile, setServerImageFile] = useState<File | null>(null);
+  const [serverBannerFile, setServerBannerFile] = useState<File | null>(null);
   const [isDeletingServer, setIsDeletingServer] = useState(false);
   const [isLeavingServer, setIsLeavingServer] = useState(false);
 
@@ -501,6 +505,7 @@ function App() {
     if (attachmentFile) {
       const formData = new FormData();
       formData.append("file", attachmentFile);
+      formData.append("upload_type", "attachments");
       try {
         const res = await fetch(`${API_BASE}/api/upload`, {
           method: "POST",
@@ -683,21 +688,43 @@ function App() {
     }
   };
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>, setter: React.Dispatch<React.SetStateAction<string>>) => {
+  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>, setter: React.Dispatch<React.SetStateAction<string>>, fileSetter?: React.Dispatch<React.SetStateAction<File | null>>) => {
     const file = e.target.files?.[0];
     if (file) {
-      const reader = new FileReader();
-      reader.onloadend = () => {
-        setter(reader.result as string);
-      };
-      reader.readAsDataURL(file);
+      if (fileSetter) fileSetter(file);
+      setter(URL.createObjectURL(file));
     }
+  };
+
+  const uploadFileToServer = async (file: File, uploadType: string): Promise<string> => {
+    const formData = new FormData();
+    formData.append("file", file);
+    formData.append("upload_type", uploadType);
+    const res = await fetch(`${API_BASE}/api/upload`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}` },
+      body: formData
+    });
+    if (res.ok) {
+      const data = await res.json();
+      return data.url;
+    }
+    throw new Error("Upload failed");
   };
 
   const saveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsSavingSettings(true);
     try {
+      let finalProfilePic = settingsProfilePic;
+      if (settingsProfilePicFile) {
+        finalProfilePic = await uploadFileToServer(settingsProfilePicFile, "avatars");
+      }
+      let finalBanner = settingsBanner;
+      if (settingsBannerFile) {
+        finalBanner = await uploadFileToServer(settingsBannerFile, "banners");
+      }
+
       const res = await fetch(`${API_BASE}/users/me`, {
         method: 'PUT',
         headers: {
@@ -707,8 +734,8 @@ function App() {
         body: JSON.stringify({
           username: settingsUsername,
           description: settingsDescription,
-          profile_picture: settingsProfilePic,
-          banner: settingsBanner
+          profile_picture: finalProfilePic,
+          banner: finalBanner
         })
       });
       if (res.ok) {
@@ -728,6 +755,15 @@ function App() {
     if (!activeServer) return;
     setIsSavingServer(true);
     try {
+      let finalImage = serverImage;
+      if (serverImageFile) {
+        finalImage = await uploadFileToServer(serverImageFile, "avatars");
+      }
+      let finalBanner = serverBanner;
+      if (serverBannerFile) {
+        finalBanner = await uploadFileToServer(serverBannerFile, "banners");
+      }
+
       const res = await fetch(`${API_BASE}/servers/${activeServer.server_id}`, {
         method: 'PUT',
         headers: {
@@ -737,8 +773,8 @@ function App() {
         body: JSON.stringify({
           server_name: serverName,
           server_description: serverDescription,
-          server_image: serverImage,
-          server_banner: serverBanner
+          server_image: finalImage,
+          server_banner: finalBanner
         })
       });
       if (res.ok) {
@@ -1464,7 +1500,7 @@ function App() {
                   )}
                   <label style={{position: 'absolute', bottom: 0, right: 0, backgroundColor: 'var(--bg-card)', borderRadius: '50%', padding: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>
                     <Plus size={16} />
-                    <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setSettingsProfilePic)} />
+                    <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setSettingsProfilePic, setSettingsProfilePicFile)} />
                   </label>
                 </div>
 
@@ -1474,7 +1510,7 @@ function App() {
                     {settingsBanner && <img src={settingsBanner} alt="Banner" style={{width: '100%', height: '100%', objectFit: 'cover'}} />}
                     <label style={{position: 'absolute', top: '8px', right: '8px', backgroundColor: 'var(--bg-card)', borderRadius: '50%', padding: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>
                       <Plus size={16} />
-                      <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setSettingsBanner)} />
+                      <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setSettingsBanner, setSettingsBannerFile)} />
                     </label>
                   </div>
                 </div>
@@ -1528,7 +1564,7 @@ function App() {
                   )}
                   <label style={{position: 'absolute', bottom: 0, right: 0, backgroundColor: 'var(--bg-card)', borderRadius: '50%', padding: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>
                     <Plus size={16} />
-                    <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setServerImage)} />
+                    <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setServerImage, setServerImageFile)} />
                   </label>
                 </div>
 
@@ -1538,7 +1574,7 @@ function App() {
                     {serverBanner && <img src={serverBanner} alt="Server Banner" style={{width: '100%', height: '100%', objectFit: 'cover'}} />}
                     <label style={{position: 'absolute', top: '8px', right: '8px', backgroundColor: 'var(--bg-card)', borderRadius: '50%', padding: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>
                       <Plus size={16} />
-                      <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setServerBanner)} />
+                      <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setServerBanner, setServerBannerFile)} />
                     </label>
                   </div>
                 </div>

@@ -1,6 +1,5 @@
 import os
 import uuid
-import base64
 import mimetypes
 import boto3
 from botocore.config import Config
@@ -12,6 +11,13 @@ R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
 R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL")
 R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
 R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL")
+
+# Clean R2 endpoint URL if it contains the bucket name or any path components
+if R2_ENDPOINT_URL:
+    from urllib.parse import urlparse, urlunparse
+    parsed = urlparse(R2_ENDPOINT_URL)
+    if parsed.path and parsed.path.strip("/"):
+        R2_ENDPOINT_URL = urlunparse((parsed.scheme, parsed.netloc, "", "", "", ""))
 
 # Local fallback configuration
 LOCAL_UPLOAD_DIR = "uploads"
@@ -39,14 +45,15 @@ else:
     if not os.path.exists(LOCAL_UPLOAD_DIR):
         os.makedirs(LOCAL_UPLOAD_DIR, exist_ok=True)
 
-def upload_file_bytes(data: bytes, filename: str, content_type: str) -> str:
+def upload_file_bytes(data: bytes, filename: str, content_type: str, folder: str = "attachments") -> str:
     """
     Uploads file bytes to Cloudflare R2 if configured, or saves locally as a fallback.
+    Files are stored in {folder}/.
     Returns the public URL or the local path.
     """
+    object_key = f"{folder}/{filename}"
+    
     if USE_R2:
-        # User requested: store everything in a base cordis/ folder in the R2
-        object_key = f"cordis/{filename}"
         s3_client.put_object(
             Bucket=R2_BUCKET_NAME,
             Key=object_key,
@@ -56,44 +63,10 @@ def upload_file_bytes(data: bytes, filename: str, content_type: str) -> str:
         return f"{R2_PUBLIC_URL.rstrip('/')}/{object_key}"
     else:
         # Fallback to local storage
-        file_path = os.path.join(LOCAL_UPLOAD_DIR, filename)
+        # E.g. uploads/avatars/avatar_123.png
+        file_path = os.path.join(LOCAL_UPLOAD_DIR, object_key)
+        os.makedirs(os.path.dirname(file_path), exist_ok=True)
         with open(file_path, "wb") as f:
             f.write(data)
         # Assuming the backend will mount 'uploads' to '/uploads'
-        return f"/uploads/{filename}"
-
-def upload_base64_image(base64_str: str, prefix: str = "image") -> Optional[str]:
-    """
-    Parses a base64 string from the frontend.
-    If it's a valid data URL, extracts bytes, uploads to storage, and returns the new URL.
-    If it's already a URL (e.g. starts with http or /), returns it as-is.
-    If empty, returns empty string.
-    """
-    if not base64_str:
-        return ""
-    
-    # If it's already a URL or path, don't re-upload
-    if base64_str.startswith("http://") or base64_str.startswith("https://") or base64_str.startswith("/"):
-        return base64_str
-
-    if base64_str.startswith("data:"):
-        try:
-            # Format: data:image/png;base64,iVBORw0KGgo...
-            header, encoded = base64_str.split(",", 1)
-            # header looks like: data:image/png;base64
-            mime_part = header.split(";")[0]
-            content_type = mime_part.split(":")[1]
-            
-            ext = mimetypes.guess_extension(content_type) or ".bin"
-            # Some extensions might be weird like .jpe, normalize if needed
-            if ext == ".jpe": ext = ".jpg"
-            
-            file_data = base64.b64decode(encoded)
-            filename = f"{prefix}_{uuid.uuid4().hex}{ext}"
-            
-            return upload_file_bytes(file_data, filename, content_type)
-        except Exception as e:
-            print(f"Error parsing base64 image: {e}")
-            return base64_str
-            
-    return base64_str
+        return f"/{LOCAL_UPLOAD_DIR}/{object_key}"

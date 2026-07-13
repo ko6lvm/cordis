@@ -7,3 +7,4 @@ pyjwt
 boto3
 python-multipart
 psycopg2-binary
+python-dotenv

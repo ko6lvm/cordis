@@ -4,7 +4,10 @@ import string
 import jwt
 import re
 from typing import Optional
-from fastapi import FastAPI, WebSocket, Depends, WebSocketDisconnect, HTTPException, status, Query, UploadFile, File
+from dotenv import load_dotenv
+load_dotenv()
+
+from fastapi import FastAPI, WebSocket, Depends, WebSocketDisconnect, HTTPException, status, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.staticfiles import StaticFiles
@@ -336,7 +339,7 @@ def register_account(account_data: models.UserRegister, db: Session = Depends(ge
         hashed_password=secured_hash,
         permissions=["USER_BASIC"],
         status="ONLINE",
-        description="", # yes ryan was here and i am superior
+        description="",
         profile_picture=""
     )
     db.add(db_user)
@@ -375,10 +378,14 @@ def update_me(update_data: models.UserUpdate, current_user: db_models.DBUser = D
         current_user.description = update_data.description
     
     if update_data.profile_picture is not None:
-        current_user.profile_picture = storage.upload_base64_image(update_data.profile_picture, "avatar") or ""
+        if update_data.profile_picture and not update_data.profile_picture.startswith(("http://", "https://", "/uploads/")):
+            raise HTTPException(status_code=400, detail="Invalid profile picture URL.")
+        current_user.profile_picture = update_data.profile_picture
         
     if update_data.banner is not None:
-        current_user.banner = storage.upload_base64_image(update_data.banner, "user_banner") or ""
+        if update_data.banner and not update_data.banner.startswith(("http://", "https://", "/uploads/")):
+            raise HTTPException(status_code=400, detail="Invalid banner URL.")
+        current_user.banner = update_data.banner
         
     db.commit()
     db.refresh(current_user)
@@ -448,12 +455,17 @@ def get_my_servers(current_user: db_models.DBUser = Depends(get_current_user), d
 
 @app.post("/servers", response_model=models.ServerResponse, status_code=201)
 def create_server(server_data: models.ServerCreate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    if server_data.server_image and not server_data.server_image.startswith(("http://", "https://", "/uploads/")):
+        raise HTTPException(status_code=400, detail="Invalid server image URL.")
+    if getattr(server_data, "server_banner", None) and not server_data.server_banner.startswith(("http://", "https://", "/uploads/")):
+        raise HTTPException(status_code=400, detail="Invalid server banner URL.")
+
     invite = generate_invite_code()
     db_server = db_models.DBServer(
         server_name=server_data.server_name,
         server_description=server_data.server_description,
-        server_image=storage.upload_base64_image(server_data.server_image, "server_icon") if server_data.server_image else "",
-        server_banner=storage.upload_base64_image(getattr(server_data, "server_banner", ""), "server_banner") if getattr(server_data, "server_banner", None) else "",
+        server_image=server_data.server_image or "",
+        server_banner=getattr(server_data, "server_banner", "") or "",
         members=[current_user.user_id],
         folders=0,
         channels=0,
@@ -490,9 +502,13 @@ def update_server(server_id: int, update_data: models.ServerUpdate, current_user
     if update_data.server_description is not None:
         server.server_description = update_data.server_description
     if update_data.server_image is not None:
-        server.server_image = storage.upload_base64_image(update_data.server_image, "server_icon") or ""
+        if update_data.server_image and not update_data.server_image.startswith(("http://", "https://", "/uploads/")):
+            raise HTTPException(status_code=400, detail="Invalid server image URL.")
+        server.server_image = update_data.server_image
     if getattr(update_data, "server_banner", None) is not None:
-        server.server_banner = storage.upload_base64_image(update_data.server_banner, "server_banner") or ""
+        if update_data.server_banner and not update_data.server_banner.startswith(("http://", "https://", "/uploads/")):
+            raise HTTPException(status_code=400, detail="Invalid server banner URL.")
+        server.server_banner = update_data.server_banner
         
     db.commit()
     db.refresh(server)
@@ -739,9 +755,16 @@ if os.path.exists("frontend/dist"):
     pass # we will mount it later
 
 @app.post("/api/upload")
-async def upload_file(file: UploadFile = File(...), current_user: db_models.DBUser = Depends(get_current_user)):
+async def upload_file(file: UploadFile = File(...), upload_type: str = Form("attachments"), current_user: db_models.DBUser = Depends(get_current_user)):
     file_bytes = await file.read()
-    url = storage.upload_file_bytes(file_bytes, file.filename, file.content_type)
+    
+    # Generate a unique, safe filename using UUID to prevent collisions and URL space issues
+    import mimetypes, uuid
+    ext = mimetypes.guess_extension(file.content_type) or ".bin"
+    if ext == ".jpe": ext = ".jpg"
+    unique_filename = f"{uuid.uuid4().hex}{ext}"
+    
+    url = storage.upload_file_bytes(file_bytes, unique_filename, file.content_type, folder=upload_type)
     return {"url": url}
 
 if os.path.exists("uploads"):

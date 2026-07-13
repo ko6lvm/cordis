@@ -24,7 +24,7 @@ Create a `.env` file in the `frontend/` directory to configure these settings.
 
 | Variable Name | Description | Default Value | Required? |
 | :--- | :--- | :--- | :--- |
-| `VITE_API_BASE` | The base URL of the FastAPI backend API. | `"http://127.0.0.1:8000"` | No |
+| `VITE_API_BASE` | The base URL of the FastAPI backend API. | `"http://127.0.0.1"` | No |
 
 > [!NOTE]
 > The WebSocket URL in the frontend is derived dynamically from `VITE_API_BASE` by converting `http` to `ws`, so you don't need to configure it separately.
