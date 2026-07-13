@@ -2,8 +2,9 @@ import time
 import random
 import string
 import jwt
+import re
 from typing import Optional
-from fastapi import FastAPI, WebSocket, Depends, WebSocketDisconnect, HTTPException, status, Query
+from fastapi import FastAPI, WebSocket, Depends, WebSocketDisconnect, HTTPException, status, Query, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.staticfiles import StaticFiles
@@ -15,6 +16,7 @@ import db_models
 from database import get_db, engine
 import bcrypt
 import os
+import storage
 
 db_models.Base.metadata.create_all(bind=engine)
 
@@ -95,9 +97,9 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SECRET_KEY = "super-secret-key-that-i-dont-wanna-write-rn-but-i-hope-i-dont-forget" # dont judge me
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7  # 1 week
+SECRET_KEY = os.getenv("SECRET_KEY", "super-secret-key-that-i-dont-wanna-write-rn-but-i-hope-i-dont-forget")
+ALGORITHM = os.getenv("JWT_ALGORITHM", "HS256")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", str(60 * 24 * 7)))
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
 
@@ -127,7 +129,7 @@ def generate_invite_code(length=6):
 class ConnectionManager:
     def __init__(self):
         self.active_connections: dict[int, list[WebSocket]] = {}
-        self.user_connections: dict[int, int] = {} # user_id -> number of active sockets
+        self.user_sockets: dict[int, list[WebSocket]] = {} # user_id -> list of active WebSockets
 
     async def connect(self, websocket: WebSocket, channel_id: int, user_id: int, db: Session):
         await websocket.accept()
@@ -136,8 +138,11 @@ class ConnectionManager:
         self.active_connections[channel_id].append(websocket)
         
         # Presence logic
-        self.user_connections[user_id] = self.user_connections.get(user_id, 0) + 1
-        if self.user_connections[user_id] == 1:
+        if user_id not in self.user_sockets:
+            self.user_sockets[user_id] = []
+        self.user_sockets[user_id].append(websocket)
+        
+        if len(self.user_sockets[user_id]) == 1:
             await self.broadcast_presence_to_server(channel_id, user_id, "online", db)
     
     async def disconnect(self, websocket: WebSocket, channel_id: int, user_id: int, db: Session):
@@ -147,16 +152,25 @@ class ConnectionManager:
                 del self.active_connections[channel_id]
                 
         # Presence logic
-        if user_id in self.user_connections:
-            self.user_connections[user_id] -= 1
-            if self.user_connections[user_id] <= 0:
-                del self.user_connections[user_id]
+        if user_id in self.user_sockets:
+            if websocket in self.user_sockets[user_id]:
+                self.user_sockets[user_id].remove(websocket)
+            if not self.user_sockets[user_id]:
+                del self.user_sockets[user_id]
                 await self.broadcast_presence_to_server(channel_id, user_id, "offline", db)
     
     async def broadcast(self, channel_id: int, message_data: dict):
         if channel_id in self.active_connections:
             for connection in self.active_connections[channel_id]:
                 await connection.send_json(message_data)
+                
+    async def send_personal_notification(self, user_id: int, event_data: dict):
+        if user_id in self.user_sockets:
+            for connection in self.user_sockets[user_id]:
+                try:
+                    await connection.send_json(event_data)
+                except:
+                    pass
                 
     async def broadcast_presence_to_server(self, source_channel_id: int, user_id: int, status: str, db: Session):
         channel = db.query(db_models.DBChannel).filter(db_models.DBChannel.channel_id == source_channel_id).first()
@@ -214,8 +228,32 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
                 raw_data["user_id"] = user.user_id
                 await manager.broadcast(channel_id, raw_data)
                 continue
+                
+            if "type" in raw_data and raw_data["type"] == "read_update":
+                message_id = raw_data.get("message_id", 0)
+                read_state = db.query(db_models.DBChannelReadState).filter(
+                    db_models.DBChannelReadState.user_id == user.user_id,
+                    db_models.DBChannelReadState.channel_id == channel_id
+                ).first()
+                if not read_state:
+                    read_state = db_models.DBChannelReadState(user_id=user.user_id, channel_id=channel_id, last_read_message_id=message_id)
+                    db.add(read_state)
+                else:
+                    read_state.last_read_message_id = max(read_state.last_read_message_id, message_id)
+                db.commit()
+                continue
 
             validated_msg = models.MessageSend(**raw_data)
+            
+            # parse mentions
+            if validated_msg.content and validated_msg.content.text:
+                mentioned_usernames = re.findall(r'@([a-zA-Z0-9_]+)', validated_msg.content.text)
+                if mentioned_usernames:
+                    mentioned_users = db.query(db_models.DBUser).filter(db_models.DBUser.username.in_(mentioned_usernames)).all()
+                    current_mentions = set(validated_msg.mentions)
+                    current_mentions.update(u.user_id for u in mentioned_users)
+                    validated_msg.mentions = list(current_mentions)
+
             msg_id = random.randint(1000000, 9999999) # server generated ID (i hope this is fine)
             timestamp = int(time.time())
             
@@ -239,6 +277,7 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
             broadcast_msg = {
                 "message_id": msg_id,
                 "channel_id": channel_id,
+                "server_id": channel.server_id,
                 "author_id": user.user_id,
                 "author": models.UserResponse.from_orm(user).dict(),
                 "content": validated_msg.content.dict(),
@@ -252,6 +291,33 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
                 "reactions": [r.dict() for r in validated_msg.reactions]
             }
             await manager.broadcast(channel_id, broadcast_msg)
+            
+            # Send notifications to other members of the channel who are online but not actively in this channel
+            channel_members = channel.members if channel.members else []
+            for member_id in channel_members:
+                if member_id == user.user_id:
+                    continue
+                active_sockets_in_chan = manager.active_connections.get(channel_id, [])
+                member_sockets = manager.user_sockets.get(member_id, [])
+                is_actively_in_chan = any(ws in active_sockets_in_chan for ws in member_sockets)
+                if member_sockets and not is_actively_in_chan:
+                    await manager.send_personal_notification(member_id, {
+                        "type": "unread_notification",
+                        "message_id": msg_id,
+                        "channel_id": channel_id,
+                        "server_id": channel.server_id,
+                        "author_id": user.user_id,
+                        "author": models.UserResponse.from_orm(user).dict(),
+                        "content": validated_msg.content.dict(),
+                        "created_at": timestamp,
+                        "modified_at": timestamp,
+                        "message_type": validated_msg.message_type,
+                        "parent_id": validated_msg.parent_id,
+                        "thread_id": validated_msg.thread_id,
+                        "mentions": validated_msg.mentions,
+                        "flags": validated_msg.flags,
+                        "reactions": [r.dict() for r in validated_msg.reactions]
+                    })
     except WebSocketDisconnect:
         await manager.disconnect(websocket, channel_id, user.user_id, db)
 
@@ -309,11 +375,59 @@ def update_me(update_data: models.UserUpdate, current_user: db_models.DBUser = D
         current_user.description = update_data.description
     
     if update_data.profile_picture is not None:
-        current_user.profile_picture = update_data.profile_picture
+        current_user.profile_picture = storage.upload_base64_image(update_data.profile_picture, "avatar") or ""
+        
+    if update_data.banner is not None:
+        current_user.banner = storage.upload_base64_image(update_data.banner, "user_banner") or ""
         
     db.commit()
     db.refresh(current_user)
     return current_user
+
+@app.get("/users/me/unreads", response_model=dict[int, models.UnreadState])
+def get_my_unreads(current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    servers = db.query(db_models.DBServer).all()
+    user_servers = [s for s in servers if current_user.user_id in s.members]
+    server_ids = [s.server_id for s in user_servers]
+    
+    channels = db.query(db_models.DBChannel).filter(db_models.DBChannel.server_id.in_(server_ids)).all()
+    dms = db.query(db_models.DBChannel).filter(db_models.DBChannel.channel_type == "dm").all()
+    user_dms = [dm for dm in dms if current_user.user_id in dm.members]
+    
+    all_channels = channels + user_dms
+    channel_ids = [c.channel_id for c in all_channels]
+    
+    read_states = db.query(db_models.DBChannelReadState).filter(
+        db_models.DBChannelReadState.user_id == current_user.user_id,
+        db_models.DBChannelReadState.channel_id.in_(channel_ids)
+    ).all()
+    read_map = {rs.channel_id: rs.last_read_message_id for rs in read_states}
+    
+    results = {}
+    for cid in channel_ids:
+        last_read_id = read_map.get(cid, 0)
+        
+        latest_msg = db.query(db_models.DBMessage).filter(db_models.DBMessage.channel_id == cid).order_by(db_models.DBMessage.message_id.desc()).first()
+        last_msg_id = latest_msg.message_id if latest_msg else 0
+        
+        new_msgs = db.query(db_models.DBMessage).filter(
+            db_models.DBMessage.channel_id == cid,
+            db_models.DBMessage.message_id > last_read_id
+        ).all()
+        
+        mentions_count = sum(1 for m in new_msgs if m.mentions and current_user.user_id in m.mentions)
+        
+        channel_obj = next((c for c in all_channels if c.channel_id == cid), None)
+        server_id = channel_obj.server_id if channel_obj else None
+        
+        results[cid] = models.UnreadState(
+            server_id=server_id,
+            last_read_message_id=last_read_id,
+            last_message_id=last_msg_id,
+            mentions_count=mentions_count
+        )
+        
+    return results
 
 @app.get("/users/{user_id}", response_model=models.UserResponse)
 def get_user_profile(user_id: int, db: Session = Depends(get_db)):
@@ -338,7 +452,8 @@ def create_server(server_data: models.ServerCreate, current_user: db_models.DBUs
     db_server = db_models.DBServer(
         server_name=server_data.server_name,
         server_description=server_data.server_description,
-        server_image=server_data.server_image,
+        server_image=storage.upload_base64_image(server_data.server_image, "server_icon") if server_data.server_image else "",
+        server_banner=storage.upload_base64_image(getattr(server_data, "server_banner", ""), "server_banner") if getattr(server_data, "server_banner", None) else "",
         members=[current_user.user_id],
         folders=0,
         channels=0,
@@ -375,7 +490,9 @@ def update_server(server_id: int, update_data: models.ServerUpdate, current_user
     if update_data.server_description is not None:
         server.server_description = update_data.server_description
     if update_data.server_image is not None:
-        server.server_image = update_data.server_image
+        server.server_image = storage.upload_base64_image(update_data.server_image, "server_icon") or ""
+    if getattr(update_data, "server_banner", None) is not None:
+        server.server_banner = storage.upload_base64_image(update_data.server_banner, "server_banner") or ""
         
     db.commit()
     db.refresh(server)
@@ -467,7 +584,7 @@ def get_server_presence(server_id: int, current_user: db_models.DBUser = Depends
         
     online_user_ids = []
     for uid in server.members:
-        if manager.user_connections.get(uid, 0) > 0:
+        if len(manager.user_sockets.get(uid, [])) > 0:
             online_user_ids.append(uid)
             
     return online_user_ids
@@ -478,7 +595,7 @@ def get_invite_preview(invite_code: str, db: Session = Depends(get_db)):
     if not server:
         raise HTTPException(status_code=404, detail="Invalid invite code")
         
-    online_count = sum(1 for uid in server.members if manager.user_connections.get(uid, 0) > 0)
+    online_count = sum(1 for uid in server.members if len(manager.user_sockets.get(uid, [])) > 0)
     
     return {
         "server_name": server.server_name,
@@ -618,5 +735,17 @@ async def custom_http_exception_handler(request, exc):
                 return FileResponse("frontend/dist/index.html")
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
+if os.path.exists("frontend/dist"):
+    pass # we will mount it later
+
+@app.post("/api/upload")
+async def upload_file(file: UploadFile = File(...), current_user: db_models.DBUser = Depends(get_current_user)):
+    file_bytes = await file.read()
+    url = storage.upload_file_bytes(file_bytes, file.filename, file.content_type)
+    return {"url": url}
+
+if os.path.exists("uploads"):
+    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
+    
 if os.path.exists("frontend/dist"):
     app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")

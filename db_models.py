@@ -11,6 +11,7 @@ class DBUser(Base):
     status = Column(String)
     description = Column(String)
     profile_picture = Column(String)
+    banner = Column(String)
 
 class DBServer(Base):
     __tablename__ = "servers"
@@ -19,6 +20,7 @@ class DBServer(Base):
     server_name = Column(String)
     server_description = Column(String)
     server_image = Column(String)
+    server_banner = Column(String)
     members = Column(JSON)
     folders = Column(Integer)
     channels = Column(Integer)
@@ -52,3 +54,11 @@ class DBMessage(Base):
     message_type = Column(String)
     parent_id = Column(Integer)
     thread_id = Column(Integer)
+
+class DBChannelReadState(Base):
+    __tablename__ = "channel_read_states"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    user_id = Column(Integer, index=True)
+    channel_id = Column(Integer, index=True)
+    last_read_message_id = Column(Integer, default=0)

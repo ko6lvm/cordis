@@ -4,3 +4,5 @@ sqlalchemy
 pydantic
 bcrypt
 pyjwt
+boto3
+python-multipart

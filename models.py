@@ -44,6 +44,7 @@ class UserResponse(BaseModel):
     status: str
     description: Optional[str] = None
     profile_picture: Optional[str] = None
+    banner: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -52,6 +53,7 @@ class UserUpdate(BaseModel):
     username: str
     description: Optional[str] = None
     profile_picture: Optional[str] = None
+    banner: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -64,18 +66,21 @@ class ServerCreate(BaseModel):
     server_name: str
     server_description: str
     server_image: str
+    server_banner: Optional[str] = ""
     is_public: Optional[bool] = False
 
 class ServerUpdate(BaseModel):
     server_name: Optional[str] = None
     server_description: Optional[str] = None
     server_image: Optional[str] = None
+    server_banner: Optional[str] = None
 
 class ServerResponse(BaseModel):
     server_id: int
     server_name: str
     server_description: str
     server_image: str
+    server_banner: Optional[str] = None
     members: List[int]
     folders: int
     channels: int
@@ -149,3 +154,9 @@ class MessageSend(BaseModel):
     mentions: List[int] = []
     flags: List[str] = []
     reactions: List[Reaction] = []
+
+class UnreadState(BaseModel):
+    server_id: Optional[int] = None
+    last_read_message_id: int
+    last_message_id: int
+    mentions_count: int

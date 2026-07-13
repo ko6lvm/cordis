@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Compass, Plus, Hash, LogOut, Send, Loader2, Settings, Users, Home, MessageSquare } from 'lucide-react';
 
-const API_BASE = "http://127.0.0.1:8000";
+const API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
 
 function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
@@ -27,7 +27,24 @@ function App() {
 
   // Realtime State
   const [ws, setWs] = useState<WebSocket | null>(null);
+  const [showMentions, setShowMentions] = useState(false);
+  const [mentionFilter, setMentionFilter] = useState('');
+  const [mentionTriggerIndex, setMentionTriggerIndex] = useState(-1);
+  const [activeSuggestionIndex, setActiveSuggestionIndex] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const [unreadStates, setUnreadStates] = useState<Record<number, { server_id: number | null, last_read_message_id: number, last_message_id: number, mentions_count: number }>>({});
+  const activeChannelRef = useRef<any>(null);
+  useEffect(() => { activeChannelRef.current = activeChannel; }, [activeChannel]);
+  const dmsRef = useRef<any[]>([]);
+  const serversRef = useRef<any[]>([]);
+  const selectChannelRef = useRef<any>(null);
+  const navigateToChannelRef = useRef<any>(null);
+
+  useEffect(() => { dmsRef.current = dms; }, [dms]);
+  useEffect(() => { serversRef.current = servers; }, [servers]);
   const [chatInput, setChatInput] = useState('');
+  const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
+  const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [typingUsers, setTypingUsers] = useState<Record<number, string>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<any>(null);
@@ -43,12 +60,14 @@ function App() {
   const [settingsUsername, setSettingsUsername] = useState('');
   const [settingsDescription, setSettingsDescription] = useState('');
   const [settingsProfilePic, setSettingsProfilePic] = useState('');
+  const [settingsBanner, setSettingsBanner] = useState('');
 
   const [showServerSettings, setShowServerSettings] = useState(false);
   const [isSavingServer, setIsSavingServer] = useState(false);
   const [serverName, setServerName] = useState('');
   const [serverDescription, setServerDescription] = useState('');
   const [serverImage, setServerImage] = useState('');
+  const [serverBanner, setServerBanner] = useState('');
   const [isDeletingServer, setIsDeletingServer] = useState(false);
   const [isLeavingServer, setIsLeavingServer] = useState(false);
 
@@ -117,9 +136,13 @@ function App() {
 
   useEffect(() => {
     if (token) {
+      if (Notification.permission === 'default') {
+        Notification.requestPermission();
+      }
       fetchMe();
       fetchMyServers();
       fetchDMs();
+      fetchUnreads();
     }
   }, [token]);
 
@@ -158,6 +181,19 @@ function App() {
     }
   };
 
+
+  const fetchUnreads = async () => {
+    try {
+      const res = await fetch(`${API_BASE}/users/me/unreads`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        setUnreadStates(await res.json());
+      }
+    } catch (e) {
+      console.error("Failed to fetch unreads", e);
+    }
+  };
   const fetchDMs = async () => {
     try {
       const res = await fetch(`${API_BASE}/dms`, {
@@ -186,6 +222,54 @@ function App() {
       }
     } catch (e) {
       console.error("Failed to fetch members or presence", e);
+    }
+  };
+
+  const navigateToChannel = async (serverId: number | null | undefined, channelId: number) => {
+    if (serverId === null || serverId === undefined) {
+      setIsViewingDMs(true);
+      setActiveServer(null);
+      const dm = dmsRef.current.find(d => d.channel_id === channelId);
+      if (dm) {
+        selectChannelRef.current?.(dm);
+      } else {
+        try {
+          const res = await fetch(`${API_BASE}/dms`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          if (res.ok) {
+            const fetchedDMs = await res.json();
+            setDms(fetchedDMs);
+            const foundDm = fetchedDMs.find((d: any) => d.channel_id === channelId);
+            if (foundDm) selectChannelRef.current?.(foundDm);
+          }
+        } catch(e) {
+          console.error(e);
+        }
+      }
+    } else {
+      const server = serversRef.current.find(s => s.server_id === serverId);
+      if (server) {
+        setIsViewingDMs(false);
+        setActiveServer(server);
+        fetchServerMembersAndPresence(serverId);
+        setIsLoadingChannels(true);
+        try {
+          const res = await fetch(`${API_BASE}/servers/${serverId}/channels`, {
+            headers: { Authorization: `Bearer ${token}` }
+          });
+          if (res.ok) {
+            const chanList = await res.json();
+            setChannels(chanList);
+            const targetChan = chanList.find((c: any) => c.channel_id === channelId);
+            if (targetChan) {
+              selectChannelRef.current?.(targetChan);
+            }
+          }
+        } finally {
+          setIsLoadingChannels(false);
+        }
+      }
     }
   };
 
@@ -251,10 +335,23 @@ function App() {
       headers: { Authorization: `Bearer ${token}` }
     });
     if (res.ok) {
-      setMessages(await res.json());
+      const msgs = await res.json();
+      setMessages(msgs);
+      if (msgs.length > 0) {
+        const lastMsgId = msgs[msgs.length - 1].message_id;
+        setUnreadStates(prev => ({
+           ...prev,
+           [channel.channel_id]: {
+             ...(prev[channel.channel_id] || { server_id: channel.server_id || null, mentions_count: 0 }),
+             last_read_message_id: Math.max(prev[channel.channel_id]?.last_read_message_id || 0, lastMsgId),
+             mentions_count: 0
+           }
+        }));
+      }
     }
 
-    const socket = new WebSocket(`ws://127.0.0.1:8000/ws/${channel.channel_id}?token=${token}`);
+    const wsUrl = API_BASE.replace(/^http/, 'ws') + `/ws/${channel.channel_id}?token=${token}`;
+    const socket = new WebSocket(wsUrl);
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === 'typing') {
@@ -273,8 +370,65 @@ function App() {
           ...prev,
           [data.user_id]: data.status === 'online'
         }));
+      } else if (data.type === 'unread_notification') {
+        setUnreadStates(prev => {
+          const next = { ...prev };
+          const chanId = data.channel_id;
+          if (!next[chanId]) next[chanId] = { server_id: data.server_id || null, last_read_message_id: 0, last_message_id: 0, mentions_count: 0 };
+          
+          next[chanId].last_message_id = data.message_id;
+          
+          const amIMentioned = currentUserRef.current && data.mentions && data.mentions.includes(currentUserRef.current.user_id);
+          
+          if (amIMentioned) {
+            next[chanId].mentions_count += 1;
+            if (Notification.permission === 'granted' && document.hidden) {
+              const notification = new Notification(`New Mention from ${data.author?.username}`, {
+                body: data.content.text
+              });
+              notification.onclick = () => {
+                window.focus();
+                navigateToChannelRef.current?.(data.server_id, data.channel_id);
+              };
+            }
+          }
+          return next;
+        });
       } else {
-        setMessages(prev => [...prev, data]);
+        if (data.channel_id === activeChannelRef.current?.channel_id) {
+          setMessages(prev => [...prev, data]);
+        }
+        setUnreadStates(prev => {
+          const next = { ...prev };
+          const chanId = data.channel_id;
+          if (!next[chanId]) next[chanId] = { server_id: data.server_id || null, last_read_message_id: 0, last_message_id: 0, mentions_count: 0 };
+          
+          next[chanId].last_message_id = data.message_id;
+          
+          const amIMentioned = currentUserRef.current && data.mentions && data.mentions.includes(currentUserRef.current.user_id);
+          
+          if (activeChannelRef.current?.channel_id !== chanId) {
+            if (amIMentioned) {
+              next[chanId].mentions_count += 1;
+              if (Notification.permission === 'granted' && document.hidden) {
+                const notification = new Notification(`New Mention from ${data.author?.username}`, {
+                  body: data.content.text
+                });
+                notification.onclick = () => {
+                  window.focus();
+                  navigateToChannelRef.current?.(data.server_id, data.channel_id);
+                };
+              }
+            }
+          } else {
+            if (socket.readyState === WebSocket.OPEN) {
+               socket.send(JSON.stringify({ type: 'read_update', message_id: data.message_id }));
+            }
+            next[chanId].last_read_message_id = data.message_id;
+            next[chanId].mentions_count = 0;
+          }
+          return next;
+        });
       }
     };
     socket.onclose = () => {
@@ -283,6 +437,10 @@ function App() {
     };
     setWs(socket);
   };
+
+  selectChannelRef.current = selectChannel;
+  navigateToChannelRef.current = navigateToChannel;
+
 
   const handleAuth = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -334,22 +492,97 @@ function App() {
     setWs(null);
   };
 
-  const sendMessage = (e: React.FormEvent) => {
+  const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!chatInput.trim() || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if ((!chatInput.trim() && !attachmentFile) || !ws || ws.readyState !== WebSocket.OPEN) return;
     
+    setIsSendingMessage(true);
+    let attachedUrl = "";
+    if (attachmentFile) {
+      const formData = new FormData();
+      formData.append("file", attachmentFile);
+      try {
+        const res = await fetch(`${API_BASE}/api/upload`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          body: formData
+        });
+        if (res.ok) {
+          const data = await res.json();
+          attachedUrl = data.url;
+        }
+      } catch (err) {
+        console.error("Upload failed", err);
+      }
+    }
+
+    const attachments = attachedUrl ? [attachedUrl] : [];
+
     ws.send(JSON.stringify({
-      content: { text: chatInput, attachments: [], embeds: [] },
+      content: { text: chatInput, attachments: attachments, embeds: [] },
       message_type: "DEFAULT",
       mentions: [],
       flags: [],
       reactions: []
     }));
     setChatInput('');
+    setAttachmentFile(null);
+    setIsSendingMessage(false);
+  };
+
+  const getMentionSuggestions = () => {
+    let list: any[] = [];
+    if (isViewingDMs) {
+      if (user) list.push(user);
+      if (activeChannel?.target_user) list.push(activeChannel.target_user);
+    } else {
+      list = serverMembers;
+    }
+    
+    if (!mentionFilter) return list;
+    return list.filter(u => 
+      u.username.toLowerCase().includes(mentionFilter.toLowerCase())
+    );
+  };
+
+  const insertMention = (username: string) => {
+    if (mentionTriggerIndex === -1) return;
+    const beforeMention = chatInput.slice(0, mentionTriggerIndex);
+    const afterMention = chatInput.slice(mentionTriggerIndex + 1 + mentionFilter.length);
+    const newText = `${beforeMention}@${username} ${afterMention}`;
+    setChatInput(newText);
+    setShowMentions(false);
+    setMentionTriggerIndex(-1);
+    setMentionFilter('');
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 10);
+  };
+
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (!showMentions) return;
+    const suggestions = getMentionSuggestions();
+    if (suggestions.length === 0) return;
+
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      setActiveSuggestionIndex(prev => (prev + 1) % suggestions.length);
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      setActiveSuggestionIndex(prev => (prev - 1 + suggestions.length) % suggestions.length);
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      insertMention(suggestions[activeSuggestionIndex].username);
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      setShowMentions(false);
+    }
   };
 
   const handleTyping = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setChatInput(e.target.value);
+    const value = e.target.value;
+    setChatInput(value);
+    
     if (ws && user) {
       if (!typingTimeoutRef.current) {
         ws.send(JSON.stringify({ type: 'typing', username: user.username }));
@@ -358,6 +591,19 @@ function App() {
       typingTimeoutRef.current = setTimeout(() => {
         typingTimeoutRef.current = null;
       }, 2000);
+    }
+
+    const selectionStart = e.target.selectionStart || 0;
+    const textBeforeCursor = value.slice(0, selectionStart);
+    const mentionMatch = textBeforeCursor.match(/@([a-zA-Z0-9_]*)$/);
+    
+    if (mentionMatch) {
+      setShowMentions(true);
+      setMentionFilter(mentionMatch[1]);
+      setMentionTriggerIndex(selectionStart - mentionMatch[0].length);
+      setActiveSuggestionIndex(0);
+    } else {
+      setShowMentions(false);
     }
   };
 
@@ -422,6 +668,7 @@ function App() {
       setSettingsUsername(user.username);
       setSettingsDescription(user.description || '');
       setSettingsProfilePic(user.profile_picture || '');
+      setSettingsBanner(user.banner || '');
       setShowSettings(true);
     }
   };
@@ -431,6 +678,7 @@ function App() {
       setServerName(activeServer.server_name);
       setServerDescription(activeServer.server_description || '');
       setServerImage(activeServer.server_image || '');
+      setServerBanner(activeServer.server_banner || '');
       setShowServerSettings(true);
     }
   };
@@ -459,7 +707,8 @@ function App() {
         body: JSON.stringify({
           username: settingsUsername,
           description: settingsDescription,
-          profile_picture: settingsProfilePic
+          profile_picture: settingsProfilePic,
+          banner: settingsBanner
         })
       });
       if (res.ok) {
@@ -488,7 +737,8 @@ function App() {
         body: JSON.stringify({
           server_name: serverName,
           server_description: serverDescription,
-          server_image: serverImage
+          server_image: serverImage,
+          server_banner: serverBanner
         })
       });
       if (res.ok) {
@@ -707,13 +957,34 @@ function App() {
     );
   }
 
+  // Render computations
+  const serverUnreadStatus: Record<number, boolean> = {};
+  const serverMentionCount: Record<number, number> = {};
+  
+  Object.values(unreadStates).forEach(state => {
+    const isUnread = state.last_message_id > state.last_read_message_id;
+    if (state.server_id) {
+      if (isUnread) serverUnreadStatus[state.server_id] = true;
+      if (state.mentions_count > 0) {
+        serverMentionCount[state.server_id] = (serverMentionCount[state.server_id] || 0) + state.mentions_count;
+      }
+    } else {
+      if (isUnread) serverUnreadStatus[0] = true; 
+      if (state.mentions_count > 0) {
+        serverMentionCount[0] = (serverMentionCount[0] || 0) + state.mentions_count;
+      }
+    }
+  });
+
   return (
     <div className="app-layout">
       {/* Server Sidebar */}
       <div className="panel server-sidebar">
         <div className={`server-icon ${isViewingDMs ? 'active' : ''}`} onClick={() => { setIsViewingDMs(true); setActiveServer(null); setActiveChannel(null); setMessages([]); }} data-tooltip="Direct Messages">
           {isViewingDMs && <div className="active-pill" />}
+          {!isViewingDMs && serverUnreadStatus[0] && <div className="unread-dot" />}
           <Home size={24} color={isViewingDMs ? '#fff' : 'var(--text-main)'} />
+          {serverMentionCount[0] > 0 && <div className="mention-badge">{serverMentionCount[0]}</div>}
         </div>
         <div className="server-separator" />
         
@@ -726,7 +997,9 @@ function App() {
           servers.map(s => (
             <div key={s.server_id} className={`server-icon ${activeServer?.server_id === s.server_id ? 'active' : ''}`} onClick={() => selectServer(s)} data-tooltip={s.server_name}>
               {activeServer?.server_id === s.server_id && <div className="active-pill" />}
+              {activeServer?.server_id !== s.server_id && serverUnreadStatus[s.server_id] && <div className="unread-dot" />}
               {getServerIconContent(s)}
+              {serverMentionCount[s.server_id] > 0 && <div className="mention-badge">{serverMentionCount[s.server_id]}</div>}
             </div>
           ))
         )}
@@ -791,7 +1064,7 @@ function App() {
                   <Settings size={18} />
                 </button>
               )}
-              {activeServer.owner_id !== user.user_id && (
+              {activeServer.owner_id !== user.user_id && activeServer.invite_code !== 'GLOBAL' && (
                 <button className="icon-btn" onClick={(e) => { e.stopPropagation(); leaveServer(); }} title="Leave Server" disabled={isLeavingServer}>
                   <LogOut size={18} />
                 </button>
@@ -871,8 +1144,10 @@ function App() {
         </div>
         
         <div className="message-list" onClick={() => setSelectedProfile(null)}>
-          {messages.map((m, i) => (
-            <div key={i} className="message" style={{display: 'flex', gap: '16px'}}>
+          {messages.map((m, i) => {
+            const isMentioned = currentUserRef.current && m.mentions?.includes(currentUserRef.current.user_id);
+            return (
+            <div key={i} className={`message ${isMentioned ? 'mentioned' : ''}`} style={{display: 'flex', gap: '16px'}}>
               <div 
                 className="msg-avatar" 
                 onClick={(e) => {
@@ -898,9 +1173,14 @@ function App() {
                   <span className="msg-time">{new Date(m.created_at * 1000).toLocaleString()}</span>
                 </div>
                 <div className="msg-text">{m.content.text}</div>
+                {m.content.attachments && m.content.attachments.map((url: string, idx: number) => (
+                  <div key={idx} className="msg-attachment" style={{marginTop: '8px'}}>
+                    <img src={url} alt="attachment" style={{maxWidth: '400px', maxHeight: '300px', borderRadius: '8px'}} />
+                  </div>
+                ))}
               </div>
             </div>
-          ))}
+          )})}
           <div ref={messagesEndRef} />
         </div>
 
@@ -911,15 +1191,37 @@ function App() {
         )}
 
         <div className="chat-input-wrapper">
+          {showMentions && getMentionSuggestions().length > 0 && (
+            <div className="mention-suggestions-popup">
+              {getMentionSuggestions().map((u, index) => (
+                <div 
+                  key={u.user_id} 
+                  className={`mention-suggestion-item ${index === activeSuggestionIndex ? 'active' : ''}`}
+                  onClick={() => insertMention(u.username)}
+                >
+                  <div className="user-avatar" style={{ width: '24px', height: '24px', fontSize: '10px' }}>
+                    {getAvatarContent(u)}
+                  </div>
+                  <span>{u.username}</span>
+                </div>
+              ))}
+            </div>
+          )}
           <form className="chat-input-box" onSubmit={sendMessage}>
+            <label style={{cursor: 'pointer', padding: '8px', display: 'flex', alignItems: 'center', color: attachmentFile ? 'var(--brand-primary)' : 'var(--text-muted)'}}>
+              <Plus size={20} />
+              <input type="file" style={{display: 'none'}} onChange={e => { if (e.target.files?.[0]) setAttachmentFile(e.target.files[0]); }} />
+            </label>
             <input 
+              ref={inputRef}
               className="chat-input" 
               placeholder={ws ? `Message #${activeChannel?.channel_name || ''}` : 'Connecting...'} 
               value={chatInput}
               onChange={handleTyping}
-              disabled={!activeChannel || !ws}
+              onKeyDown={handleKeyDown}
+              disabled={!activeChannel || !ws || isSendingMessage}
             />
-            <button type="submit" className="icon-btn" disabled={!activeChannel || !chatInput.trim() || !ws}>
+            <button type="submit" className="icon-btn" disabled={!activeChannel || (!chatInput.trim() && !attachmentFile) || !ws || isSendingMessage}>
               <Send size={20} />
             </button>
           </form>
@@ -1166,6 +1468,17 @@ function App() {
                   </label>
                 </div>
 
+                <div style={{width: '100%', marginBottom: '16px'}}>
+                  <label style={{fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '8px', display: 'block'}}>Profile Banner</label>
+                  <div style={{width: '100%', height: '100px', backgroundColor: 'var(--bg-secondary)', borderRadius: '8px', position: 'relative', overflow: 'hidden'}}>
+                    {settingsBanner && <img src={settingsBanner} alt="Banner" style={{width: '100%', height: '100%', objectFit: 'cover'}} />}
+                    <label style={{position: 'absolute', top: '8px', right: '8px', backgroundColor: 'var(--bg-card)', borderRadius: '50%', padding: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>
+                      <Plus size={16} />
+                      <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setSettingsBanner)} />
+                    </label>
+                  </div>
+                </div>
+
                 <div style={{width: '100%', display: 'flex', flexDirection: 'column', gap: '16px'}}>
                   <div>
                     <label style={{fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '8px', display: 'block'}}>Username</label>
@@ -1217,6 +1530,17 @@ function App() {
                     <Plus size={16} />
                     <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setServerImage)} />
                   </label>
+                </div>
+
+                <div style={{width: '100%', marginBottom: '16px'}}>
+                  <label style={{fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '8px', display: 'block'}}>Server Banner</label>
+                  <div style={{width: '100%', height: '100px', backgroundColor: 'var(--bg-secondary)', borderRadius: '8px', position: 'relative', overflow: 'hidden'}}>
+                    {serverBanner && <img src={serverBanner} alt="Server Banner" style={{width: '100%', height: '100%', objectFit: 'cover'}} />}
+                    <label style={{position: 'absolute', top: '8px', right: '8px', backgroundColor: 'var(--bg-card)', borderRadius: '50%', padding: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>
+                      <Plus size={16} />
+                      <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setServerBanner)} />
+                    </label>
+                  </div>
                 </div>
 
                 <div style={{width: '100%', display: 'flex', flexDirection: 'column', gap: '16px'}}>
