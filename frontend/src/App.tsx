@@ -136,7 +136,7 @@ function App() {
 
   useEffect(() => {
     if (token) {
-      if (Notification.permission === 'default') {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
         Notification.requestPermission();
       }
       fetchMe();
@@ -382,7 +382,7 @@ function App() {
           
           if (amIMentioned) {
             next[chanId].mentions_count += 1;
-            if (Notification.permission === 'granted' && document.hidden) {
+            if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && document.hidden) {
               const notification = new Notification(`New Mention from ${data.author?.username}`, {
                 body: data.content.text
               });
@@ -410,7 +410,7 @@ function App() {
           if (activeChannelRef.current?.channel_id !== chanId) {
             if (amIMentioned) {
               next[chanId].mentions_count += 1;
-              if (Notification.permission === 'granted' && document.hidden) {
+              if (typeof Notification !== 'undefined' && Notification.permission === 'granted' && document.hidden) {
                 const notification = new Notification(`New Mention from ${data.author?.username}`, {
                   body: data.content.text
                 });
