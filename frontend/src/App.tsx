@@ -1,9 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Compass, Plus, Hash, LogOut, Send, Loader2, Settings, Users, Home, MessageSquare, Check, X, AlertTriangle, Pencil, Trash2, Reply } from 'lucide-react';
+import { Compass, Plus, Hash, LogOut, Send, Loader2, Settings, Users, Home, MessageSquare, Check, X, AlertTriangle, Pencil, Trash2, Reply, File as FileIcon, UploadCloud } from 'lucide-react';
+import { useDropzone } from 'react-dropzone';
 
 const API_BASE = import.meta.env.VITE_API_BASE || (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? "http://127.0.0.1:8000" : "");
+
+const getFullUrl = (url: string | undefined | null) => {
+  if (!url) return '';
+  if (url.startsWith('/')) return `${API_BASE}${url}`;
+  return url;
+};
 
 const formatLastActive = (lastActiveAt: number | undefined, isOnline: boolean) => {
   if (isOnline) return "Active now";
@@ -84,7 +91,7 @@ const MessageEmbed = ({ embed, onImageLoad }: { embed: any, onImageLoad?: () => 
         )}
       </div>
       {embed.image && (
-        <img src={embed.image} alt="embed" className="msg-embed-thumbnail" onLoad={onImageLoad} />
+        <img src={getFullUrl(embed.image)} alt="embed" className="msg-embed-thumbnail" onLoad={onImageLoad} />
       )}
     </div>
   );
@@ -132,6 +139,30 @@ function App() {
   const [chatInput, setChatInput] = useState('');
   const [replyingTo, setReplyingTo] = useState<any>(null);
   const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
+  const [attachmentPreview, setAttachmentPreview] = useState<string | null>(null);
+
+  const onDrop = React.useCallback((acceptedFiles: File[]) => {
+    if (acceptedFiles.length > 0) {
+      setAttachmentFile(acceptedFiles[0]);
+    }
+  }, []);
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    noClick: true,
+    noKeyboard: true
+  });
+
+  useEffect(() => {
+    if (attachmentFile) {
+      const url = URL.createObjectURL(attachmentFile);
+      setAttachmentPreview(url);
+      return () => URL.revokeObjectURL(url);
+    } else {
+      setAttachmentPreview(null);
+    }
+  }, [attachmentFile]);
+
   const [isSendingMessage, setIsSendingMessage] = useState(false);
   const [editingMessageId, setEditingMessageId] = useState<number | null>(null);
   const [editContent, setEditContent] = useState('');
@@ -624,46 +655,50 @@ function App() {
 
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSendingMessage) return;
     if ((!chatInput.trim() && !attachmentFile) || !ws || ws.readyState !== WebSocket.OPEN) return;
     
     setIsSendingMessage(true);
-    let attachedUrl = "";
-    if (attachmentFile) {
-      const formData = new FormData();
-      formData.append("file", attachmentFile);
-      formData.append("upload_type", "attachments");
-      try {
-        const res = await fetch(`${API_BASE}/api/upload`, {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: formData
-        });
-        if (res.ok) {
-          const data = await res.json();
-          attachedUrl = data.url;
+    try {
+      let attachedUrl = "";
+      if (attachmentFile) {
+        const formData = new FormData();
+        formData.append("file", attachmentFile);
+        formData.append("upload_type", "attachments");
+        try {
+          const res = await fetch(`${API_BASE}/api/upload`, {
+            method: "POST",
+            headers: { Authorization: `Bearer ${token}` },
+            body: formData
+          });
+          if (res.ok) {
+            const data = await res.json();
+            attachedUrl = data.url;
+          }
+        } catch (err) {
+          console.error("Upload failed", err);
         }
-      } catch (err) {
-        console.error("Upload failed", err);
       }
-    }
 
-    const attachments = attachedUrl ? [attachedUrl] : [];
+      const attachments = attachedUrl ? [attachedUrl] : [];
 
-    ws.send(JSON.stringify({
-      content: { text: chatInput, attachments: attachments, embeds: [] },
-      message_type: "DEFAULT",
-      parent_id: replyingTo?.message_id || 0,
-      mentions: [],
-      flags: [],
-      reactions: []
-    }));
-    setChatInput('');
-    if (inputRef.current) {
-      inputRef.current.style.height = 'auto';
+      ws.send(JSON.stringify({
+        content: { text: chatInput, attachments: attachments, embeds: [] },
+        message_type: "DEFAULT",
+        parent_id: replyingTo?.message_id || 0,
+        mentions: [],
+        flags: [],
+        reactions: []
+      }));
+      setChatInput('');
+      if (inputRef.current) {
+        inputRef.current.style.height = 'auto';
+      }
+      setAttachmentFile(null);
+      setReplyingTo(null);
+    } finally {
+      setIsSendingMessage(false);
     }
-    setAttachmentFile(null);
-    setReplyingTo(null);
-    setIsSendingMessage(false);
   };
 
   const handleEditMessageSubmit = (messageId: number, originalAttachments: any[]) => {
@@ -1076,14 +1111,14 @@ function App() {
 
   const getAvatarContent = (u: any) => {
     if (u?.profile_picture) {
-      return <img src={u.profile_picture} alt="avatar" style={{width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover'}} />;
+      return <img src={getFullUrl(u.profile_picture)} alt="avatar" style={{width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover'}} />;
     }
     return u?.username ? u.username.charAt(0).toUpperCase() : 'U';
   };
 
   const getServerIconContent = (s: any) => {
     if (s?.server_image) {
-      return <img src={s.server_image} alt="icon" style={{width: '100%', height: '100%', borderRadius: 'inherit', objectFit: 'cover'}} />;
+      return <img src={getFullUrl(s.server_image)} alt="icon" style={{width: '100%', height: '100%', borderRadius: 'inherit', objectFit: 'cover'}} />;
     }
     return s.server_name.charAt(0).toUpperCase();
   };
@@ -1143,7 +1178,7 @@ function App() {
             <>
               <div style={{width: '80px', height: '80px', margin: '0 auto 16px', borderRadius: '16px', backgroundColor: 'var(--bg-300)', overflow: 'hidden'}}>
                 {invitePreviewData?.server_image ? (
-                  <img src={invitePreviewData.server_image} style={{width: '100%', height: '100%', objectFit: 'cover'}} />
+                  <img src={getFullUrl(invitePreviewData.server_image)} style={{width: '100%', height: '100%', objectFit: 'cover'}} />
                 ) : (
                   <div style={{width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '2.5rem', fontWeight: 600}}>
                     {invitePreviewData?.server_name?.charAt(0).toUpperCase()}
@@ -1266,7 +1301,29 @@ function App() {
   });
 
   return (
-    <div className="app-layout">
+    <div 
+      {...getRootProps()}
+      className="app-layout"
+    >
+      <input {...getInputProps()} />
+      {isDragActive && (
+          <div style={{
+            position: 'fixed',
+            top: 0, left: 0, right: 0, bottom: 0,
+            backgroundColor: 'rgba(0, 0, 0, 0.7)',
+            zIndex: 9999,
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'white'
+          }}>
+            <div style={{pointerEvents: 'none', display: 'flex', flexDirection: 'column', alignItems: 'center'}}>
+              <UploadCloud size={64} style={{marginBottom: '16px', color: 'var(--brand-primary)'}} />
+              <h2 style={{fontSize: '24px', fontWeight: 600}}>Drop files to upload</h2>
+            </div>
+          </div>
+      )}
       {/* Server Sidebar */}
       <div className="panel server-sidebar">
         <div className={`server-icon ${isViewingDMs ? 'active' : ''}`} onClick={() => { setIsViewingDMs(true); setActiveServer(null); setActiveChannel(null); setMessages([]); }} data-tooltip="Direct Messages">
@@ -1562,7 +1619,7 @@ function App() {
                       </div>
                       {m.content.attachments && m.content.attachments.map((url: string, idx: number) => (
                         <div key={idx} className="msg-attachment" style={{marginTop: '8px'}}>
-                          <img src={url} alt="attachment" style={{maxWidth: '400px', maxHeight: '300px', borderRadius: '8px'}} onLoad={scrollToBottom} />
+                          <img src={getFullUrl(url)} alt="attachment" style={{maxWidth: '400px', maxHeight: '300px', borderRadius: '8px'}} onLoad={scrollToBottom} />
                         </div>
                       ))}
                       {m.content.embeds && m.content.embeds.map((embed: any, idx: number) => (
@@ -1632,7 +1689,25 @@ function App() {
               </button>
             </div>
           )}
-          <form className="chat-input-box" onSubmit={sendMessage} style={{borderTopLeftRadius: replyingTo ? 0 : '8px', borderTopRightRadius: replyingTo ? 0 : '8px'}}>
+          <form className="chat-input-box" onSubmit={sendMessage} style={{borderTopLeftRadius: replyingTo ? 0 : '8px', borderTopRightRadius: replyingTo ? 0 : '8px', position: 'relative'}}>
+            {attachmentPreview && (
+              <div className="attachment-preview" style={{position: 'absolute', bottom: 'calc(100% + 8px)', left: '0', padding: '12px', backgroundColor: 'var(--bg-panel)', borderRadius: '8px', border: '1px solid var(--border-subtle)', display: 'flex', alignItems: 'center', gap: '12px', boxShadow: 'var(--shadow-lift)'}}>
+                {(attachmentFile?.type?.startsWith('image/') || attachmentFile?.name?.match(/\.(jpeg|jpg|gif|png|webp|avif)$/i)) ? (
+                  <img src={attachmentPreview} alt="" style={{height: '60px', width: '60px', objectFit: 'cover', borderRadius: '4px'}} onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }} />
+                ) : (
+                  <div style={{height: '60px', width: '60px', backgroundColor: 'var(--bg-dark)', borderRadius: '4px', display: 'flex', alignItems: 'center', justifyContent: 'center'}}>
+                    <FileIcon size={24} />
+                  </div>
+                )}
+                <div style={{display: 'flex', flexDirection: 'column', maxWidth: '200px', minWidth: 0}}>
+                  <span style={{fontSize: '13px', fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>{attachmentFile?.name}</span>
+                  <span style={{fontSize: '11px', color: 'var(--text-muted)'}}>{Math.round((attachmentFile?.size || 0) / 1024)} KB</span>
+                </div>
+                <button type="button" className="icon-btn" style={{padding: '4px', alignSelf: 'flex-start'}} onClick={() => { setAttachmentFile(null); setAttachmentPreview(null); }}>
+                  <X size={16} />
+                </button>
+              </div>
+            )}
             <label style={{cursor: 'pointer', padding: '8px', display: 'flex', alignItems: 'center', color: attachmentFile ? 'var(--brand-primary)' : 'var(--text-muted)'}}>
               <Plus size={20} />
               <input type="file" style={{display: 'none'}} onChange={e => { if (e.target.files?.[0]) setAttachmentFile(e.target.files[0]); }} />
@@ -1845,7 +1920,7 @@ function App() {
                       <div className="server-card-info">
                         <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
                            <div style={{width: '24px', height: '24px', borderRadius: '50%', backgroundColor: 'var(--brand-primary)', flexShrink: 0, overflow: 'hidden'}}>
-                             {s.server_image ? <img src={s.server_image} style={{width: '100%', height: '100%', objectFit: 'cover'}} /> : null}
+                             {s.server_image ? <img src={getFullUrl(s.server_image)} style={{width: '100%', height: '100%', objectFit: 'cover'}} /> : null}
                            </div>
                            <h4 style={{margin: 0}}>{s.server_name}</h4>
                         </div>
@@ -1886,7 +1961,7 @@ function App() {
                 
                 <div style={{position: 'relative', width: '80px', height: '80px', marginBottom: '16px'}}>
                   {settingsProfilePic ? (
-                    <img src={settingsProfilePic} alt="Profile" style={{width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover'}} />
+                    <img src={getFullUrl(settingsProfilePic)} alt="Profile" style={{width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover'}} />
                   ) : (
                     <div style={{width: '100%', height: '100%', borderRadius: '50%', backgroundColor: 'var(--brand-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '32px', color: '#fff', fontWeight: 600}}>
                       {settingsUsername.charAt(0).toUpperCase()}
@@ -1901,7 +1976,7 @@ function App() {
                 <div style={{width: '100%', marginBottom: '16px'}}>
                   <label style={{fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '8px', display: 'block'}}>Profile Banner</label>
                   <div style={{width: '100%', height: '100px', backgroundColor: 'var(--bg-secondary)', borderRadius: '8px', position: 'relative', overflow: 'hidden'}}>
-                    {settingsBanner && <img src={settingsBanner} alt="Banner" style={{width: '100%', height: '100%', objectFit: 'cover'}} />}
+                    {settingsBanner && <img src={getFullUrl(settingsBanner)} alt="Banner" style={{width: '100%', height: '100%', objectFit: 'cover'}} />}
                     <label style={{position: 'absolute', top: '8px', right: '8px', backgroundColor: 'var(--bg-card)', borderRadius: '50%', padding: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>
                       <Plus size={16} />
                       <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setSettingsBanner, setSettingsBannerFile)} />
@@ -1950,7 +2025,7 @@ function App() {
                 
                 <div style={{position: 'relative', width: '80px', height: '80px', marginBottom: '16px'}}>
                   {serverImage ? (
-                    <img src={serverImage} alt="Server Icon" style={{width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover'}} />
+                    <img src={getFullUrl(serverImage)} alt="Server Icon" style={{width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover'}} />
                   ) : (
                     <div style={{width: '100%', height: '100%', borderRadius: '50%', backgroundColor: 'var(--brand-primary)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '32px', color: '#fff', fontWeight: 600}}>
                       {serverName.charAt(0).toUpperCase()}
@@ -1965,7 +2040,7 @@ function App() {
                 <div style={{width: '100%', marginBottom: '16px'}}>
                   <label style={{fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', marginBottom: '8px', display: 'block'}}>Server Banner</label>
                   <div style={{width: '100%', height: '100px', backgroundColor: 'var(--bg-secondary)', borderRadius: '8px', position: 'relative', overflow: 'hidden'}}>
-                    {serverBanner && <img src={serverBanner} alt="Server Banner" style={{width: '100%', height: '100%', objectFit: 'cover'}} />}
+                    {serverBanner && <img src={getFullUrl(serverBanner)} alt="Server Banner" style={{width: '100%', height: '100%', objectFit: 'cover'}} />}
                     <label style={{position: 'absolute', top: '8px', right: '8px', backgroundColor: 'var(--bg-card)', borderRadius: '50%', padding: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>
                       <Plus size={16} />
                       <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setServerBanner, setServerBannerFile)} />

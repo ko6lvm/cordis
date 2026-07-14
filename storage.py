@@ -8,9 +8,13 @@ from typing import Optional
 # Cloudflare R2 Configuration
 R2_ACCESS_KEY_ID = os.getenv("R2_ACCESS_KEY_ID")
 R2_SECRET_ACCESS_KEY = os.getenv("R2_SECRET_ACCESS_KEY")
-R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL")
-R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME")
+R2_ENDPOINT_URL = os.getenv("R2_ENDPOINT_URL") or os.getenv("R2_ENDPOINT")
+R2_BUCKET_NAME = os.getenv("R2_BUCKET_NAME") or os.getenv("R2_BUCKET")
 R2_PUBLIC_URL = os.getenv("R2_PUBLIC_URL")
+
+# If using a local emulator without a dedicated public CDN URL, construct a default public URL
+if not R2_PUBLIC_URL and R2_ENDPOINT_URL and R2_BUCKET_NAME:
+    R2_PUBLIC_URL = f"{R2_ENDPOINT_URL.rstrip('/')}/{R2_BUCKET_NAME}"
 
 # Clean R2 endpoint URL if it contains the bucket name or any path components
 if R2_ENDPOINT_URL:
