@@ -12,6 +12,7 @@ class DBUser(Base):
     description = Column(String)
     profile_picture = Column(String)
     banner = Column(String)
+    last_active_at = Column(Integer, nullable=True)
 
 class DBServer(Base):
     __tablename__ = "servers"

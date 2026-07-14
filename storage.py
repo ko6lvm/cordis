@@ -70,3 +70,30 @@ def upload_file_bytes(data: bytes, filename: str, content_type: str, folder: str
             f.write(data)
         # Assuming the backend will mount 'uploads' to '/uploads'
         return f"/{LOCAL_UPLOAD_DIR}/{object_key}"
+
+def delete_file(url: str):
+    """
+    Deletes a file from Cloudflare R2 or local storage based on its public URL.
+    """
+    if not url:
+        return
+        
+    from urllib.parse import unquote
+    
+    if USE_R2 and R2_PUBLIC_URL and url.startswith(R2_PUBLIC_URL):
+        prefix = R2_PUBLIC_URL.rstrip('/') + '/'
+        object_key = unquote(url[len(prefix):])
+        try:
+            s3_client.delete_object(Bucket=R2_BUCKET_NAME, Key=object_key)
+        except Exception as e:
+            print(f"Failed to delete {object_key} from R2: {e}")
+            
+    elif url.startswith(f"/{LOCAL_UPLOAD_DIR}/"):
+        prefix = f"/{LOCAL_UPLOAD_DIR}/"
+        object_key = unquote(url[len(prefix):])
+        file_path = os.path.join(LOCAL_UPLOAD_DIR, object_key)
+        try:
+            if os.path.exists(file_path):
+                os.remove(file_path)
+        except Exception as e:
+            print(f"Failed to delete local file {file_path}: {e}")

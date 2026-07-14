@@ -1,7 +1,47 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Compass, Plus, Hash, LogOut, Send, Loader2, Settings, Users, Home, MessageSquare } from 'lucide-react';
+import { Compass, Plus, Hash, LogOut, Send, Loader2, Settings, Users, Home, MessageSquare, Check, X, AlertTriangle, Pencil, Trash2, Reply } from 'lucide-react';
 
 const API_BASE = import.meta.env.VITE_API_BASE || (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? "http://127.0.0.1:8000" : "");
+
+const formatLastActive = (lastActiveAt: number | undefined, isOnline: boolean) => {
+  if (isOnline) return "Active now";
+  if (!lastActiveAt) return "Unknown";
+  
+  const diffInSeconds = Math.floor(Date.now() / 1000) - lastActiveAt;
+  let relative = "";
+  if (diffInSeconds < 60) relative = "less than a minute ago";
+  else if (diffInSeconds < 3600) relative = `${Math.floor(diffInSeconds / 60)}m ago`;
+  else if (diffInSeconds < 86400) relative = `${Math.floor(diffInSeconds / 3600)}h ago`;
+  else relative = `${Math.floor(diffInSeconds / 86400)}d ago`;
+
+  const absolute = new Date(lastActiveAt * 1000).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
+  return `Active ${relative} (${absolute})`;
+};
+
+const renderMessageText = (text: string | undefined, onMentionClick?: (username: string, e: React.MouseEvent) => void) => {
+  if (!text) return null;
+  const parts = text.split(/(@\w+)/g);
+  return parts.map((part, i) => {
+    if (part.startsWith('@') && part.length > 1) {
+      const username = part.slice(1);
+      return (
+        <span 
+          key={i} 
+          className="mention-ping"
+          onClick={(e) => {
+            if (onMentionClick) {
+              e.stopPropagation();
+              onMentionClick(username, e);
+            }
+          }}
+        >
+          {part}
+        </span>
+      );
+    }
+    return part;
+  });
+};
 
 function App() {
   const [token, setToken] = useState<string | null>(localStorage.getItem('token'));
@@ -43,8 +83,11 @@ function App() {
   useEffect(() => { dmsRef.current = dms; }, [dms]);
   useEffect(() => { serversRef.current = servers; }, [servers]);
   const [chatInput, setChatInput] = useState('');
+  const [replyingTo, setReplyingTo] = useState<any>(null);
   const [attachmentFile, setAttachmentFile] = useState<File | null>(null);
   const [isSendingMessage, setIsSendingMessage] = useState(false);
+  const [editingMessageId, setEditingMessageId] = useState<number | null>(null);
+  const [editContent, setEditContent] = useState('');
   const [typingUsers, setTypingUsers] = useState<Record<number, string>>({});
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const typingTimeoutRef = useRef<any>(null);
@@ -79,6 +122,10 @@ function App() {
   const [joinInviteCode, setJoinInviteCode] = useState('');
   const [isJoiningByInvite, setIsJoiningByInvite] = useState(false);
   const [joinInviteError, setJoinInviteError] = useState('');
+  
+  const [showCreateChannelModal, setShowCreateChannelModal] = useState(false);
+  const [newChannelName, setNewChannelName] = useState('');
+  const [isCreatingChannel, setIsCreatingChannel] = useState(false);
   
   // Pending invite from URL
   const [pendingInviteCode, setPendingInviteCode] = useState<string | null>(null);
@@ -125,6 +172,10 @@ function App() {
   const [showMemberList, setShowMemberList] = useState(true);
   const [serverMembers, setServerMembers] = useState<any[]>([]);
   const [onlineUsers, setOnlineUsers] = useState<Record<number, boolean>>({});
+  const isUserOnline = (userId: number | undefined, username: string | undefined) => {
+    if (username?.toLowerCase() === 'system') return true;
+    return userId ? !!onlineUsers[userId] : false;
+  };
   const [selectedProfile, setSelectedProfile] = useState<{user: any, rect: DOMRect} | null>(null);
 
   const currentUserRef = useRef<any>(null);
@@ -335,6 +386,7 @@ function App() {
     setActiveChannel(channel);
     if (ws) { ws.close(); }
     
+    let lastMsgId = 0;
     const res = await fetch(`${API_BASE}/channels/${channel.channel_id}/messages?limit=50`, {
       headers: { Authorization: `Bearer ${token}` }
     });
@@ -342,7 +394,7 @@ function App() {
       const msgs = await res.json();
       setMessages(msgs);
       if (msgs.length > 0) {
-        const lastMsgId = msgs[msgs.length - 1].message_id;
+        lastMsgId = msgs[msgs.length - 1].message_id;
         setUnreadStates(prev => ({
            ...prev,
            [channel.channel_id]: {
@@ -356,6 +408,11 @@ function App() {
 
     const wsUrl = API_BASE.replace(/^http/, 'ws') + `/ws/${channel.channel_id}?token=${token}`;
     const socket = new WebSocket(wsUrl);
+    socket.onopen = () => {
+      if (lastMsgId > 0) {
+        socket.send(JSON.stringify({ type: 'read_update', message_id: lastMsgId }));
+      }
+    };
     socket.onmessage = (event) => {
       const data = JSON.parse(event.data);
       if (data.type === 'typing') {
@@ -398,6 +455,10 @@ function App() {
           }
           return next;
         });
+      } else if (data.type === 'message_update') {
+        if (data.channel_id === activeChannelRef.current?.channel_id) {
+          setMessages(prev => prev.map(msg => msg.message_id === data.message_id ? data : msg));
+        }
       } else {
         if (data.channel_id === activeChannelRef.current?.channel_id) {
           setMessages(prev => [...prev, data]);
@@ -450,6 +511,20 @@ function App() {
     e.preventDefault();
     setAuthError('');
     setIsLoadingAuth(true);
+    
+    if (!isLogin) {
+      if (password.length < 8) {
+        setAuthError('Password must be at least 8 characters long.');
+        setIsLoadingAuth(false);
+        return;
+      }
+      if (!(/[a-zA-Z]/.test(password) && /[0-9]/.test(password))) {
+        setAuthError('Password must contain both letters and numbers.');
+        setIsLoadingAuth(false);
+        return;
+      }
+    }
+
     try {
       if (isLogin) {
         const res = await fetch(`${API_BASE}/login`, {
@@ -526,13 +601,39 @@ function App() {
     ws.send(JSON.stringify({
       content: { text: chatInput, attachments: attachments, embeds: [] },
       message_type: "DEFAULT",
+      parent_id: replyingTo?.message_id || 0,
       mentions: [],
       flags: [],
       reactions: []
     }));
     setChatInput('');
     setAttachmentFile(null);
+    setReplyingTo(null);
     setIsSendingMessage(false);
+  };
+
+  const handleEditMessageSubmit = (messageId: number, originalAttachments: any[]) => {
+    if (!editContent.trim() || !ws || ws.readyState !== WebSocket.OPEN) {
+      setEditingMessageId(null);
+      return;
+    }
+    ws.send(JSON.stringify({
+      type: "message_edit",
+      message_id: messageId,
+      content: { text: editContent, attachments: originalAttachments || [], embeds: [] }
+    }));
+    setEditingMessageId(null);
+    setEditContent('');
+  };
+
+  const handleDeleteMessage = (messageId: number, bypassConfirm: boolean = false) => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (bypassConfirm || window.confirm("Are you sure you want to delete this message?")) {
+      ws.send(JSON.stringify({
+        type: "message_delete",
+        message_id: messageId
+      }));
+    }
   };
 
   const getMentionSuggestions = () => {
@@ -638,6 +739,40 @@ function App() {
       }
     } finally {
       setIsJoiningServer(null);
+    }
+  };
+
+  const createChannel = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newChannelName.trim() || !activeServer) return;
+    setIsCreatingChannel(true);
+    try {
+      const res = await fetch(`${API_BASE}/channels`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          server_id: activeServer.server_id,
+          channel_name: newChannelName.trim(),
+          channel_type: 'TEXT'
+        })
+      });
+      if (res.ok) {
+        const channel = await res.json();
+        setChannels([...channels, channel]);
+        setShowCreateChannelModal(false);
+        setNewChannelName('');
+        selectChannel(channel);
+      } else {
+        alert("Failed to create channel.");
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error creating channel");
+    } finally {
+      setIsCreatingChannel(false);
     }
   };
 
@@ -974,18 +1109,63 @@ function App() {
   if (!token) {
     return (
       <div className="auth-container">
-        <div className="card auth-box">
-          <h2 className="text-xl" style={{textAlign: 'center', marginBottom: '8px'}}>{isLogin ? 'Welcome Back' : 'Create an Account'}</h2>
-          {authError && <div className="error-msg">{authError}</div>}
-          <form onSubmit={handleAuth} style={{display: 'flex', flexDirection: 'column', gap: '16px'}}>
-            <input className="input" type="text" placeholder="Username" value={username} onChange={e=>setUsername(e.target.value)} required disabled={isLoadingAuth} />
-            <input className="input" type="password" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} required disabled={isLoadingAuth} />
-            <button className="btn" type="submit" disabled={isLoadingAuth}>
-              {isLoadingAuth ? <Loader2 size={18} className="spinner" /> : isLogin ? 'Login' : 'Register'}
-            </button>
-          </form>
-          <div className="auth-link" onClick={() => !isLoadingAuth && setIsLogin(!isLogin)}>
-            {isLogin ? "Need an account? Register" : "Already have an account? Login"}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', width: '100%', maxWidth: '440px', padding: '16px' }}>
+          <div className="card" style={{
+            backgroundColor: 'rgba(242, 63, 67, 0.1)',
+            border: '1px solid rgba(242, 63, 67, 0.3)',
+            padding: '16px',
+            borderRadius: '8px',
+            display: 'flex',
+            flexDirection: 'column',
+            gap: '8px',
+            boxShadow: 'var(--shadow-lift)'
+          }}>
+            <div style={{
+              color: '#f23f43',
+              fontWeight: 700,
+              fontSize: '1.25rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '8px'
+            }}>
+              <AlertTriangle size={20} />
+              Cordis Beta v0.0.0
+            </div>
+            <div style={{
+              color: '#dbdee1',
+              fontSize: '0.85rem',
+              lineHeight: '1.4',
+              fontWeight: 500
+            }}>
+              WARNING: THIS IS A PUBLIC BETA. DATABASE IS TO SUBJECT TO RESET. DO NOT SAVE IMPORTANT DATA.
+            </div>
+          </div>
+
+          <div className="card auth-box" style={{ width: '100%' }}>
+            <h2 className="text-xl" style={{textAlign: 'center', marginBottom: '8px'}}>{isLogin ? 'Log In' : 'Create an Account'}</h2>
+            {authError && <div className="error-msg">{authError}</div>}
+            <form onSubmit={handleAuth} style={{display: 'flex', flexDirection: 'column', gap: '16px'}}>
+              <input className="input" type="text" placeholder="Username" value={username} onChange={e=>setUsername(e.target.value)} required disabled={isLoadingAuth} />
+              <input className="input" type="password" placeholder="Password" value={password} onChange={e=>setPassword(e.target.value)} required disabled={isLoadingAuth} />
+              {!isLogin && (
+                <div className="password-requirements" style={{ display: 'flex', flexDirection: 'column', gap: '6px', fontSize: '0.85rem', marginTop: '-8px', marginBottom: '-4px', padding: '0 4px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: password.length >= 8 ? 'var(--status-online, #23a559)' : '#fa777c' }}>
+                    {password.length >= 8 ? <Check size={14} /> : <X size={14} />}
+                    <span>At least 8 characters long</span>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: (/[a-zA-Z]/.test(password) && /[0-9]/.test(password)) ? 'var(--status-online, #23a559)' : '#fa777c' }}>
+                    {(/[a-zA-Z]/.test(password) && /[0-9]/.test(password)) ? <Check size={14} /> : <X size={14} />}
+                    <span>Contains both letters and numbers</span>
+                  </div>
+                </div>
+              )}
+              <button className="btn" type="submit" disabled={isLoadingAuth}>
+                {isLoadingAuth ? <Loader2 size={18} className="spinner" /> : isLogin ? 'Login' : 'Register'}
+              </button>
+            </form>
+            <div className="auth-link" onClick={() => !isLoadingAuth && setIsLogin(!isLogin)}>
+              {isLogin ? "Need an account? Register" : "Already have an account? Login"}
+            </div>
           </div>
         </div>
         {renderInvitePreviewModal()}
@@ -1063,7 +1243,7 @@ function App() {
                 <div style={{fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
                   {activeServer?.server_name || 'No Server'}
                 </div>
-                {activeServer && (
+                {activeServer && activeServer.invite_code !== 'GLOBAL' && (
                   <button 
                     className="btn" 
                     style={{
@@ -1114,7 +1294,7 @@ function App() {
               <div key={dm.channel_id} className={`channel-item ${activeChannel?.channel_id === dm.channel_id ? 'active' : ''}`} onClick={() => selectChannel(dm)} style={{padding: '6px 8px', display: 'flex', alignItems: 'center', gap: '10px'}}>
                 <div className="user-avatar" style={{width: '32px', height: '32px'}}>
                   {getAvatarContent(dm.target_user)}
-                  <div className={`status-indicator ${onlineUsers[dm.target_user?.user_id] ? 'online' : 'offline'}`} style={{width: '10px', height: '10px', bottom: '-2px', right: '-2px', border: '2px solid var(--bg-panel)'}}></div>
+                  <div className={`status-indicator ${isUserOnline(dm.target_user?.user_id, dm.target_user?.username) ? 'online' : 'offline'}`} style={{width: '10px', height: '10px', bottom: '-2px', right: '-2px', border: '2px solid var(--bg-panel)'}}></div>
                 </div>
                 <span style={{fontWeight: 500}}>{dm.target_user?.username || 'Unknown User'}</span>
               </div>
@@ -1125,12 +1305,37 @@ function App() {
               <div className="skeleton skeleton-text-short" style={{height: '24px'}}></div>
             </>
           ) : (
-            channels.map(c => (
-              <div key={c.channel_id} className={`channel-item ${activeChannel?.channel_id === c.channel_id ? 'active' : ''}`} onClick={() => selectChannel(c)}>
-                <Hash size={18} />
-                {c.channel_name}
+            <>
+              <div style={{
+                display: 'flex', 
+                alignItems: 'center', 
+                justifyContent: 'space-between',
+                padding: '12px 10px 4px 10px',
+                color: 'var(--text-muted)',
+                fontSize: '12px',
+                fontWeight: 600,
+                textTransform: 'uppercase',
+                letterSpacing: '0.02em'
+              }}>
+                <span>Channels</span>
+                {activeServer?.owner_id === user?.user_id && (
+                  <button 
+                    className="icon-btn" 
+                    onClick={() => setShowCreateChannelModal(true)} 
+                    title="Create Channel"
+                    style={{ padding: '2px', background: 'transparent' }}
+                  >
+                    <Plus size={16} />
+                  </button>
+                )}
               </div>
-            ))
+              {channels.map(c => (
+                <div key={c.channel_id} className={`channel-item ${activeChannel?.channel_id === c.channel_id ? 'active' : ''}`} onClick={() => selectChannel(c)}>
+                  <Hash size={18} />
+                  {c.channel_name}
+                </div>
+              ))}
+            </>
           )}
         </div>
         {user && (
@@ -1182,8 +1387,31 @@ function App() {
         <div className="message-list" onClick={() => setSelectedProfile(null)}>
           {messages.map((m, i) => {
             const isMentioned = currentUserRef.current && m.mentions?.includes(currentUserRef.current.user_id);
+            const isDeleted = m.flags?.includes("DELETED");
+            const isEdited = m.flags?.includes("EDITED");
+            const canEdit = currentUserRef.current?.user_id === m.author_id;
+            const canDelete = canEdit || (activeServer && currentUserRef.current?.user_id === activeServer.owner_id);
+            
             return (
-            <div key={i} className={`message ${isMentioned ? 'mentioned' : ''}`} style={{display: 'flex', gap: '16px'}}>
+            <div key={i} id={`message-${m.message_id}`} className={`message ${isMentioned ? 'mentioned' : ''} ${isDeleted ? 'deleted' : ''}`} style={{display: 'flex', gap: '16px', position: 'relative', flexDirection: 'column'}}>
+              {m.parent_message && (
+                <div 
+                  className="inline-quote" 
+                  onClick={() => {
+                    const el = document.getElementById(`message-${m.parent_message.message_id}`);
+                    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  }}
+                  style={{display: 'flex', alignItems: 'center', gap: '8px', cursor: 'pointer', paddingLeft: '42px', marginBottom: '-12px', fontSize: '13px', color: 'var(--text-muted)'}}
+                >
+                  <div style={{width: '2px', height: '12px', backgroundColor: 'var(--border)', borderRadius: '2px'}}></div>
+                  <div className="msg-avatar" style={{width: '16px', height: '16px', minWidth: '16px', fontSize: '8px'}}>
+                    {getAvatarContent(m.parent_message.author)}
+                  </div>
+                  <span style={{fontWeight: 500}}>{m.parent_message.author?.username || 'Unknown'}</span>
+                  <span style={{whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '400px'}}>{m.parent_message.content?.text || 'Attachment'}</span>
+                </div>
+              )}
+              <div style={{display: 'flex', gap: '16px', position: 'relative'}}>
               <div 
                 className="msg-avatar" 
                 onClick={(e) => {
@@ -1194,7 +1422,7 @@ function App() {
               >
                 {getAvatarContent(m.author)}
               </div>
-              <div className="msg-content">
+              <div className="msg-content" style={{flex: 1}}>
                 <div className="msg-header">
                   <span 
                     className="msg-author"
@@ -1206,14 +1434,85 @@ function App() {
                   >
                     {m.author?.username || `User ${m.author_id}`}
                   </span>
-                  <span className="msg-time">{new Date(m.created_at * 1000).toLocaleString()}</span>
+                  <span className="msg-time">
+                    {new Date(m.created_at * 1000).toLocaleString()}
+                    {isEdited && !isDeleted && <span className="edited-tag" style={{marginLeft: '4px', fontSize: '11px', color: 'var(--text-muted)'}}>(edited)</span>}
+                  </span>
                 </div>
-                <div className="msg-text">{m.content.text}</div>
-                {m.content.attachments && m.content.attachments.map((url: string, idx: number) => (
-                  <div key={idx} className="msg-attachment" style={{marginTop: '8px'}}>
-                    <img src={url} alt="attachment" style={{maxWidth: '400px', maxHeight: '300px', borderRadius: '8px'}} />
-                  </div>
-                ))}
+                
+                {isDeleted ? (
+                  <div className="msg-text tombstone" style={{color: 'var(--text-muted)', fontStyle: 'italic'}}>This message was deleted.</div>
+                ) : (
+                  editingMessageId === m.message_id ? (
+                    <div className="msg-edit-container" style={{marginTop: '4px'}}>
+                      <textarea
+                        className="msg-edit-input"
+                        value={editContent}
+                        onChange={(e) => setEditContent(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            handleEditMessageSubmit(m.message_id, m.content.attachments);
+                          } else if (e.key === 'Escape') {
+                            setEditingMessageId(null);
+                          }
+                        }}
+                        autoFocus
+                        onFocus={(e) => {
+                          const val = e.currentTarget.value;
+                          e.currentTarget.setSelectionRange(val.length, val.length);
+                        }}
+                      />
+                      <div className="msg-edit-actions" style={{marginTop: '4px'}}>
+                        <span style={{fontSize: '12px', color: 'var(--text-muted)'}}>
+                          escape to <span className="cancel-link" style={{color: 'var(--brand-primary)', cursor: 'pointer'}} onClick={() => setEditingMessageId(null)}>cancel</span> • enter to <span className="save-link" style={{color: 'var(--brand-primary)', cursor: 'pointer'}} onClick={() => handleEditMessageSubmit(m.message_id, m.content.attachments)}>save</span>
+                        </span>
+                      </div>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="msg-text">
+                        {renderMessageText(m.content.text, (username, e) => {
+                          let matchedUser = serverMembers.find(u => u.username === username) || 
+                                            dms.find(d => d.target_user.username === username)?.target_user ||
+                                            messages.find(msg => msg.author.username === username)?.author;
+                          
+                          if (!matchedUser) {
+                            matchedUser = { username, user_id: 0 };
+                          }
+                          setSelectedProfile({ user: matchedUser, rect: e.currentTarget.getBoundingClientRect() });
+                        })}
+                      </div>
+                      {m.content.attachments && m.content.attachments.map((url: string, idx: number) => (
+                        <div key={idx} className="msg-attachment" style={{marginTop: '8px'}}>
+                          <img src={url} alt="attachment" style={{maxWidth: '400px', maxHeight: '300px', borderRadius: '8px'}} />
+                        </div>
+                      ))}
+                    </>
+                  )
+                )}
+              </div>
+              
+              {!isDeleted && editingMessageId !== m.message_id && (
+                <div className="msg-actions">
+                  <button className="icon-btn action-btn" onClick={() => setReplyingTo(m)} title="Reply">
+                    <Reply size={16} />
+                  </button>
+                  {canEdit && (
+                    <button className="icon-btn action-btn" onClick={() => {
+                      setEditingMessageId(m.message_id);
+                      setEditContent(m.content.text);
+                    }} title="Edit">
+                      <Pencil size={16} />
+                    </button>
+                  )}
+                  {canDelete && (
+                    <button className="icon-btn action-btn danger" onClick={(e) => handleDeleteMessage(m.message_id, e.shiftKey)} title="Delete (Hold Shift to bypass confirmation)">
+                      <Trash2 size={16} />
+                    </button>
+                  )}
+                </div>
+              )}
               </div>
             </div>
           )})}
@@ -1243,7 +1542,17 @@ function App() {
               ))}
             </div>
           )}
-          <form className="chat-input-box" onSubmit={sendMessage}>
+          {replyingTo && (
+            <div className="reply-banner" style={{display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '8px 16px', backgroundColor: 'var(--bg-secondary)', borderTopLeftRadius: '8px', borderTopRightRadius: '8px', borderBottom: '1px solid var(--border)'}}>
+              <div style={{fontSize: '13px', color: 'var(--text-muted)'}}>
+                Replying to <span style={{fontWeight: 600, color: 'var(--text-primary)'}}>@{replyingTo.author?.username}</span>
+              </div>
+              <button className="icon-btn" style={{padding: '4px'}} onClick={() => setReplyingTo(null)}>
+                <X size={16} />
+              </button>
+            </div>
+          )}
+          <form className="chat-input-box" onSubmit={sendMessage} style={{borderTopLeftRadius: replyingTo ? 0 : '8px', borderTopRightRadius: replyingTo ? 0 : '8px'}}>
             <label style={{cursor: 'pointer', padding: '8px', display: 'flex', alignItems: 'center', color: attachmentFile ? 'var(--brand-primary)' : 'var(--text-muted)'}}>
               <Plus size={20} />
               <input type="file" style={{display: 'none'}} onChange={e => { if (e.target.files?.[0]) setAttachmentFile(e.target.files[0]); }} />
@@ -1279,7 +1588,7 @@ function App() {
               >
                 <div className="user-avatar member-avatar">
                   {getAvatarContent(activeChannel.target_user)}
-                  <div className={`status-indicator ${onlineUsers[activeChannel.target_user?.user_id] ? 'online' : 'offline'}`}></div>
+                  <div className={`status-indicator ${isUserOnline(activeChannel.target_user?.user_id, activeChannel.target_user?.username) ? 'online' : 'offline'}`}></div>
                 </div>
                 <span className="member-name">{activeChannel.target_user?.username}</span>
               </div>
@@ -1300,8 +1609,8 @@ function App() {
             </>
           ) : (
             <>
-              <h3 className="member-group-title">Online — {serverMembers.filter(m => onlineUsers[m.user_id]).length}</h3>
-              {serverMembers.filter(m => onlineUsers[m.user_id]).map(m => (
+              <h3 className="member-group-title">Online — {serverMembers.filter(m => isUserOnline(m.user_id, m.username)).length}</h3>
+              {serverMembers.filter(m => isUserOnline(m.user_id, m.username)).map(m => (
                 <div 
                   key={m.user_id} 
                   className="member-item" 
@@ -1318,8 +1627,8 @@ function App() {
                 </div>
               ))}
 
-              <h3 className="member-group-title" style={{marginTop: '16px'}}>Offline — {serverMembers.filter(m => !onlineUsers[m.user_id]).length}</h3>
-              {serverMembers.filter(m => !onlineUsers[m.user_id]).map(m => (
+              <h3 className="member-group-title" style={{marginTop: '16px'}}>Offline — {serverMembers.filter(m => !isUserOnline(m.user_id, m.username)).length}</h3>
+              {serverMembers.filter(m => !isUserOnline(m.user_id, m.username)).map(m => (
                 <div 
                   key={m.user_id} 
                   className="member-item offline"
@@ -1363,7 +1672,11 @@ function App() {
               </div>
             )}
             <div className="desc-title" style={{marginTop: '12px'}}>CORDIS MEMBER SINCE</div>
-            <p style={{color: '#e5e7eb', fontSize: '0.875rem', marginBottom: '16px'}}>July 2026</p>
+            <p style={{color: '#e5e7eb', fontSize: '0.875rem', marginBottom: '8px'}}>July 2026</p>
+            <div className="desc-title" style={{marginTop: '12px'}}>LAST ACTIVE</div>
+            <p style={{color: '#e5e7eb', fontSize: '0.875rem', marginBottom: '16px'}}>
+              {formatLastActive(selectedProfile.user.last_active_at, isUserOnline(selectedProfile.user.user_id, selectedProfile.user.username))}
+            </p>
             {user && selectedProfile.user.user_id !== user.user_id && (
               <button 
                 className="btn" 
@@ -1613,6 +1926,71 @@ function App() {
       )}
 
       {renderInvitePreviewModal()}
+
+      {/* Create Channel Modal */}
+      {showCreateChannelModal && (
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowCreateChannelModal(false); }}>
+          <div className="modal-content" style={{maxWidth: '400px'}}>
+            <div className="modal-header" style={{ position: 'relative' }}>
+              <div className="modal-title">Create Channel</div>
+              <div className="modal-desc">Create a new text channel to organize your discussions.</div>
+              <button 
+                className="icon-btn" 
+                onClick={() => setShowCreateChannelModal(false)}
+                style={{ position: 'absolute', top: '16px', right: '16px', color: 'var(--text-muted)' }}
+              >
+                <X size={20} />
+              </button>
+            </div>
+            <form onSubmit={createChannel}>
+              <div className="modal-body" style={{display: 'flex', flexDirection: 'column', gap: '12px'}}>
+                <div className="form-group" style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                  <label htmlFor="channelName" style={{ fontSize: '0.8rem', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase' }}>Channel Name</label>
+                  <div style={{
+                    display: 'flex', 
+                    alignItems: 'center', 
+                    backgroundColor: 'var(--bg-input)', 
+                    borderRadius: 'var(--radius-sm)', 
+                    border: '1px solid var(--border-subtle)', 
+                    paddingLeft: '10px'
+                  }}>
+                    <Hash size={16} style={{color: 'var(--text-muted)', marginRight: '6px'}}/>
+                    <input 
+                      type="text" 
+                      id="channelName" 
+                      className="input"
+                      required 
+                      autoFocus
+                      placeholder="new-channel" 
+                      value={newChannelName}
+                      onChange={e => setNewChannelName(e.target.value.toLowerCase().replace(/\s+/g, '-'))}
+                      disabled={isCreatingChannel}
+                      style={{ 
+                        border: 'none', 
+                        backgroundColor: 'transparent', 
+                        padding: '10px 10px 10px 0', 
+                        margin: 0,
+                        flex: 1,
+                        color: 'var(--text-normal)',
+                        outline: 'none'
+                      }}
+                    />
+                  </div>
+                  <small style={{color: 'var(--text-muted)', fontSize: '0.75rem'}}>
+                    Only lowercase letters, numbers, and dashes.
+                  </small>
+                </div>
+              </div>
+              <div className="modal-footer" style={{ marginTop: '16px' }}>
+                <button type="button" className="btn btn-secondary" onClick={() => setShowCreateChannelModal(false)} disabled={isCreatingChannel}>Cancel</button>
+                <button type="submit" className="btn" disabled={isCreatingChannel} style={{minWidth: '120px'}}>
+                  {isCreatingChannel ? <Loader2 size={18} className="spinner" /> : 'Create Channel'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -14,6 +14,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 import models
 import db_models
 from database import get_db, engine
@@ -25,15 +26,37 @@ db_models.Base.metadata.create_all(bind=engine)
 
 app = FastAPI()
 
+SYSTEM_USER_ID = None
+
+def is_system_user(user_id: int, db: Session = None) -> bool:
+    global SYSTEM_USER_ID
+    if SYSTEM_USER_ID is not None:
+        return user_id == SYSTEM_USER_ID
+    if db is not None:
+        system_user = db.query(db_models.DBUser).filter(func.lower(db_models.DBUser.username) == "system").first()
+        if system_user:
+            SYSTEM_USER_ID = system_user.user_id
+            return user_id == SYSTEM_USER_ID
+    return False
+
 @app.on_event("startup")
 def startup_event():
+    global SYSTEM_USER_ID
     db = next(get_db())
     try:
-        system_user = db.query(db_models.DBUser).filter(db_models.DBUser.username == "System").first()
+        try:
+            from sqlalchemy import text
+            db.execute(text("ALTER TABLE users ADD COLUMN last_active_at INTEGER"))
+            db.commit()
+        except Exception:
+            db.rollback()
+
+        system_user = db.query(db_models.DBUser).filter(func.lower(db_models.DBUser.username) == "system").first()
+        desired_hash = "$2b$12$nIW.6/aVmj9CGIlmVEsfa.hQ9XG.qGETc34QFULL21eISUUIKmsCG"
         if not system_user:
             system_user = db_models.DBUser(
                 username="System",
-                hashed_password="N/A",
+                hashed_password=desired_hash,
                 permissions=["ADMIN"],
                 status="ONLINE",
                 description="Cordis System",
@@ -42,6 +65,16 @@ def startup_event():
             db.add(system_user)
             db.commit()
             db.refresh(system_user)
+        else:
+            try:
+                is_correct = bcrypt.checkpw("cordisSystemAdmin123!".encode('utf-8'), system_user.hashed_password.encode('utf-8'))
+            except Exception:
+                is_correct = False
+            if not is_correct:
+                system_user.hashed_password = desired_hash
+                db.commit()
+            
+        SYSTEM_USER_ID = system_user.user_id
             
         global_server = db.query(db_models.DBServer).filter(db_models.DBServer.invite_code == "GLOBAL").first()
         if not global_server:
@@ -111,6 +144,14 @@ def create_access_token(data: dict):
     encoded_jwt = jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
     return encoded_jwt
 
+def update_user_activity(user_id: int, db: Session):
+    current_time = int(time.time())
+    user = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == user_id).first()
+    if user:
+        if not user.last_active_at or (current_time - user.last_active_at) > 60:
+            user.last_active_at = current_time
+            db.commit()
+
 def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -123,6 +164,8 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     user = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == int(user_id)).first()
     if user is None:
         raise HTTPException(status_code=401, detail="User not found")
+        
+    update_user_activity(user.user_id, db)
     return user
 
 def generate_invite_code(length=6):
@@ -147,6 +190,8 @@ class ConnectionManager:
         
         if len(self.user_sockets[user_id]) == 1:
             await self.broadcast_presence_to_server(channel_id, user_id, "online", db)
+            
+        update_user_activity(user_id, db)
     
     async def disconnect(self, websocket: WebSocket, channel_id: int, user_id: int, db: Session):
         if channel_id in self.active_connections:
@@ -161,6 +206,11 @@ class ConnectionManager:
             if not self.user_sockets[user_id]:
                 del self.user_sockets[user_id]
                 await self.broadcast_presence_to_server(channel_id, user_id, "offline", db)
+                
+                user = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == user_id).first()
+                if user:
+                    user.last_active_at = int(time.time())
+                    db.commit()
     
     async def broadcast(self, channel_id: int, message_data: dict):
         if channel_id in self.active_connections:
@@ -226,6 +276,8 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
         while True:
             raw_data = await websocket.receive_json()
             
+            update_user_activity(user.user_id, db)
+            
             # Special real-time events (typing)
             if "type" in raw_data and raw_data["type"] == "typing":
                 raw_data["user_id"] = user.user_id
@@ -244,6 +296,88 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
                 else:
                     read_state.last_read_message_id = max(read_state.last_read_message_id, message_id)
                 db.commit()
+                continue
+
+            if "type" in raw_data and raw_data["type"] == "message_edit":
+                msg_id = raw_data.get("message_id")
+                new_content = raw_data.get("content")
+                if msg_id and new_content:
+                    db_msg = db.query(db_models.DBMessage).filter(db_models.DBMessage.message_id == msg_id).first()
+                    if db_msg and db_msg.author_id == user.user_id:
+                        db_msg.content = new_content
+                        db_msg.modified_at = int(time.time())
+                        flags = list(db_msg.flags or [])
+                        if "EDITED" not in flags:
+                            flags.append("EDITED")
+                        db_msg.flags = flags
+                        from sqlalchemy.orm.attributes import flag_modified
+                        flag_modified(db_msg, "flags")
+                        db.commit()
+                        
+                        broadcast_msg = {
+                            "type": "message_update",
+                            "message_id": db_msg.message_id,
+                            "channel_id": db_msg.channel_id,
+                            "server_id": channel.server_id,
+                            "author_id": db_msg.author_id,
+                            "author": models.UserResponse.from_orm(user).dict(),
+                            "content": db_msg.content,
+                            "created_at": db_msg.created_at,
+                            "modified_at": db_msg.modified_at,
+                            "message_type": db_msg.message_type,
+                            "parent_id": db_msg.parent_id,
+                            "thread_id": db_msg.thread_id,
+                            "mentions": db_msg.mentions,
+                            "flags": db_msg.flags,
+                            "reactions": db_msg.reactions
+                        }
+                        await manager.broadcast(channel_id, broadcast_msg)
+                continue
+
+            if "type" in raw_data and raw_data["type"] == "message_delete":
+                msg_id = raw_data.get("message_id")
+                if msg_id:
+                    db_msg = db.query(db_models.DBMessage).filter(db_models.DBMessage.message_id == msg_id).first()
+                    if db_msg:
+                        # Check permissions
+                        is_author = db_msg.author_id == user.user_id
+                        is_server_owner = False
+                        if channel.server_id:
+                            server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == channel.server_id).first()
+                            if server and server.owner_id == user.user_id:
+                                is_server_owner = True
+                                
+                        if is_author or is_server_owner:
+                            db_msg.content = {"text": "", "attachments": [], "embeds": []}
+                            db_msg.modified_at = int(time.time())
+                            flags = list(db_msg.flags or [])
+                            if "DELETED" not in flags:
+                                flags.append("DELETED")
+                            db_msg.flags = flags
+                            from sqlalchemy.orm.attributes import flag_modified
+                            flag_modified(db_msg, "flags")
+                            db.commit()
+                            
+                            author_user = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == db_msg.author_id).first()
+                            
+                            broadcast_msg = {
+                                "type": "message_update",
+                                "message_id": db_msg.message_id,
+                                "channel_id": db_msg.channel_id,
+                                "server_id": channel.server_id,
+                                "author_id": db_msg.author_id,
+                                "author": models.UserResponse.from_orm(author_user).dict() if author_user else None,
+                                "content": db_msg.content,
+                                "created_at": db_msg.created_at,
+                                "modified_at": db_msg.modified_at,
+                                "message_type": db_msg.message_type,
+                                "parent_id": db_msg.parent_id,
+                                "thread_id": db_msg.thread_id,
+                                "mentions": db_msg.mentions,
+                                "flags": db_msg.flags,
+                                "reactions": db_msg.reactions
+                            }
+                            await manager.broadcast(channel_id, broadcast_msg)
                 continue
 
             validated_msg = models.MessageSend(**raw_data)
@@ -293,6 +427,16 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
                 "flags": validated_msg.flags,
                 "reactions": [r.dict() for r in validated_msg.reactions]
             }
+            
+            if validated_msg.parent_id != 0:
+                parent_msg = db.query(db_models.DBMessage).filter(db_models.DBMessage.message_id == validated_msg.parent_id).first()
+                if parent_msg:
+                    p_dict = models.Message.from_orm(parent_msg).dict()
+                    p_author = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == parent_msg.author_id).first()
+                    if p_author:
+                        p_dict["author"] = models.UserResponse.from_orm(p_author).dict()
+                    broadcast_msg["parent_message"] = p_dict
+
             await manager.broadcast(channel_id, broadcast_msg)
             
             # Send notifications to other members of the channel who are online but not actively in this channel
@@ -326,7 +470,12 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
 
 @app.post("/register", response_model=models.UserResponse, status_code=status.HTTP_201_CREATED)
 def register_account(account_data: models.UserRegister, db: Session = Depends(get_db)):
-    existing_user = db.query(db_models.DBUser).filter(db_models.DBUser.username == account_data.username).first()
+    if len(account_data.password) < 8:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must be at least 8 characters long.")
+    if not (any(c.isalpha() for c in account_data.password) and any(c.isdigit() for c in account_data.password)):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Password must contain both letters and numbers.")
+    
+    existing_user = db.query(db_models.DBUser).filter(func.lower(db_models.DBUser.username) == account_data.username.lower()).first()
     if existing_user:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Username taken.")
     
@@ -350,7 +499,7 @@ def register_account(account_data: models.UserRegister, db: Session = Depends(ge
 
 @app.post("/login", response_model=models.Token)
 def login(account_data: models.UserLogin, db: Session = Depends(get_db)):
-    user = db.query(db_models.DBUser).filter(db_models.DBUser.username == account_data.username).first()
+    user = db.query(db_models.DBUser).filter(func.lower(db_models.DBUser.username) == account_data.username.lower()).first()
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
     
@@ -369,7 +518,7 @@ def get_me(current_user: db_models.DBUser = Depends(get_current_user)):
 @app.put("/users/me", response_model=models.UserResponse)
 def update_me(update_data: models.UserUpdate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if update_data.username != current_user.username:
-        existing = db.query(db_models.DBUser).filter(db_models.DBUser.username == update_data.username).first()
+        existing = db.query(db_models.DBUser).filter(func.lower(db_models.DBUser.username) == update_data.username.lower()).first()
         if existing:
             raise HTTPException(status_code=400, detail="Username already taken.")
         current_user.username = update_data.username
@@ -380,11 +529,15 @@ def update_me(update_data: models.UserUpdate, current_user: db_models.DBUser = D
     if update_data.profile_picture is not None:
         if update_data.profile_picture and not update_data.profile_picture.startswith(("http://", "https://", "/uploads/")):
             raise HTTPException(status_code=400, detail="Invalid profile picture URL.")
+        if current_user.profile_picture and current_user.profile_picture != update_data.profile_picture:
+            storage.delete_file(current_user.profile_picture)
         current_user.profile_picture = update_data.profile_picture
         
     if update_data.banner is not None:
         if update_data.banner and not update_data.banner.startswith(("http://", "https://", "/uploads/")):
             raise HTTPException(status_code=400, detail="Invalid banner URL.")
+        if current_user.banner and current_user.banner != update_data.banner:
+            storage.delete_file(current_user.banner)
         current_user.banner = update_data.banner
         
     db.commit()
@@ -504,10 +657,14 @@ def update_server(server_id: int, update_data: models.ServerUpdate, current_user
     if update_data.server_image is not None:
         if update_data.server_image and not update_data.server_image.startswith(("http://", "https://", "/uploads/")):
             raise HTTPException(status_code=400, detail="Invalid server image URL.")
+        if server.server_image and server.server_image != update_data.server_image:
+            storage.delete_file(server.server_image)
         server.server_image = update_data.server_image
     if getattr(update_data, "server_banner", None) is not None:
         if update_data.server_banner and not update_data.server_banner.startswith(("http://", "https://", "/uploads/")):
             raise HTTPException(status_code=400, detail="Invalid server banner URL.")
+        if server.server_banner and server.server_banner != update_data.server_banner:
+            storage.delete_file(server.server_banner)
         server.server_banner = update_data.server_banner
         
     db.commit()
@@ -600,7 +757,7 @@ def get_server_presence(server_id: int, current_user: db_models.DBUser = Depends
         
     online_user_ids = []
     for uid in server.members:
-        if len(manager.user_sockets.get(uid, [])) > 0:
+        if len(manager.user_sockets.get(uid, [])) > 0 or is_system_user(uid, db):
             online_user_ids.append(uid)
             
     return online_user_ids
@@ -611,7 +768,7 @@ def get_invite_preview(invite_code: str, db: Session = Depends(get_db)):
     if not server:
         raise HTTPException(status_code=404, detail="Invalid invite code")
         
-    online_count = sum(1 for uid in server.members if len(manager.user_sockets.get(uid, [])) > 0)
+    online_count = sum(1 for uid in server.members if len(manager.user_sockets.get(uid, [])) > 0 or is_system_user(uid, db))
     
     return {
         "server_name": server.server_name,
@@ -655,8 +812,8 @@ def get_server_channels(server_id: int, current_user: db_models.DBUser = Depends
 @app.post("/channels", response_model=models.ChannelResponse, status_code=201)
 def create_channel(channel_data: models.ChannelCreate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == channel_data.server_id).first()
-    if not server or current_user.user_id not in server.members:
-        raise HTTPException(status_code=403, detail="Access Denied")
+    if not server or current_user.user_id != server.owner_id:
+        raise HTTPException(status_code=403, detail="Access Denied. Only server owner can create channels.")
 
     db_channel = db_models.DBChannel(
         server_id=channel_data.server_id,
@@ -678,14 +835,31 @@ def get_channel_history(channel_id: int, limit: int = 50, current_user: db_model
     messages = db.query(db_models.DBMessage).filter(db_models.DBMessage.channel_id == channel_id).order_by(db_models.DBMessage.created_at.desc()).limit(limit).all()
     
     author_ids = {m.author_id for m in messages}
+    
+    # Fetch parent messages
+    parent_ids = {m.parent_id for m in messages if getattr(m, "parent_id", 0) != 0}
+    parent_messages = []
+    if parent_ids:
+        parent_messages = db.query(db_models.DBMessage).filter(db_models.DBMessage.message_id.in_(parent_ids)).all()
+        author_ids.update({m.author_id for m in parent_messages})
+        
     users = db.query(db_models.DBUser).filter(db_models.DBUser.user_id.in_(author_ids)).all()
     user_map = {u.user_id: u for u in users}
+    
+    parent_map = {}
+    for p_msg in parent_messages:
+        p_dict = models.Message.from_orm(p_msg).dict()
+        if p_msg.author_id in user_map:
+            p_dict["author"] = models.UserResponse.from_orm(user_map[p_msg.author_id]).dict()
+        parent_map[p_msg.message_id] = p_dict
     
     results = []
     for msg in reversed(messages):
         msg_dict = models.Message.from_orm(msg).dict()
         if msg.author_id in user_map:
             msg_dict["author"] = models.UserResponse.from_orm(user_map[msg.author_id]).dict()
+        if getattr(msg, "parent_id", 0) != 0 and msg.parent_id in parent_map:
+            msg_dict["parent_message"] = parent_map[msg.parent_id]
         results.append(msg_dict)
         
     return results

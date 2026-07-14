@@ -1,5 +1,7 @@
-from pydantic import BaseModel
+import time
+from pydantic import BaseModel, model_validator
 from typing import List, Optional
+
 
 # ==========================================
 # 1. EMBED & REACTION SUB-SCHEMAS (Nested Data)
@@ -45,6 +47,14 @@ class UserResponse(BaseModel):
     description: Optional[str] = None
     profile_picture: Optional[str] = None
     banner: Optional[str] = None
+    last_active_at: Optional[int] = None
+
+    @model_validator(mode="after")
+    def set_system_active(self) -> "UserResponse":
+        if self.username and self.username.lower() == "system":
+            self.last_active_at = int(time.time())
+            self.status = "ONLINE"
+        return self
 
     class Config:
         from_attributes = True
@@ -142,6 +152,7 @@ class Message(BaseModel):
     mentions: List[int]
     flags: List[str]
     reactions: List[Reaction]
+    parent_message: Optional[dict] = None
 
     class Config:
         from_attributes = True
