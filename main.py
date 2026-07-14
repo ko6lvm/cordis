@@ -436,7 +436,7 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
                                 is_server_owner = True
                                 
                         if is_author or is_server_owner:
-                            db_msg.content = {"text": "", "attachments": [], "embeds": []}
+                            # Do not clear content in DB, only flag it
                             db_msg.modified_at = int(time.time())
                             flags = list(db_msg.flags or [])
                             if "DELETED" not in flags:
@@ -448,6 +448,7 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
                             
                             author_user = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == db_msg.author_id).first()
                             
+                            censored_content = {"text": "", "attachments": [], "embeds": []}
                             broadcast_msg = {
                                 "type": "message_update",
                                 "message_id": db_msg.message_id,
@@ -455,7 +456,7 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
                                 "server_id": channel.server_id,
                                 "author_id": db_msg.author_id,
                                 "author": models.UserResponse.from_orm(author_user).dict() if author_user else None,
-                                "content": db_msg.content,
+                                "content": censored_content,
                                 "created_at": db_msg.created_at,
                                 "modified_at": db_msg.modified_at,
                                 "message_type": db_msg.message_type,
@@ -955,6 +956,8 @@ def get_channel_history(channel_id: int, limit: int = 50, current_user: db_model
     parent_map = {}
     for p_msg in parent_messages:
         p_dict = models.Message.from_orm(p_msg).dict()
+        if "DELETED" in (p_dict.get("flags") or []):
+            p_dict["content"] = {"text": "", "attachments": [], "embeds": []}
         if p_msg.author_id in user_map:
             p_dict["author"] = models.UserResponse.from_orm(user_map[p_msg.author_id]).dict()
         parent_map[p_msg.message_id] = p_dict
@@ -962,6 +965,8 @@ def get_channel_history(channel_id: int, limit: int = 50, current_user: db_model
     results = []
     for msg in reversed(messages):
         msg_dict = models.Message.from_orm(msg).dict()
+        if "DELETED" in (msg_dict.get("flags") or []):
+            msg_dict["content"] = {"text": "", "attachments": [], "embeds": []}
         if msg.author_id in user_map:
             msg_dict["author"] = models.UserResponse.from_orm(user_map[msg.author_id]).dict()
         if getattr(msg, "parent_id", 0) != 0 and msg.parent_id in parent_map:
@@ -969,6 +974,44 @@ def get_channel_history(channel_id: int, limit: int = 50, current_user: db_model
         results.append(msg_dict)
         
     return results
+
+@app.get("/messages/{message_id}", response_model=models.Message)
+def get_single_message(message_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    msg = db.query(db_models.DBMessage).filter(db_models.DBMessage.message_id == message_id).first()
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+        
+    channel = db.query(db_models.DBChannel).filter(db_models.DBChannel.channel_id == msg.channel_id).first()
+    if not channel or current_user.user_id not in channel.members:
+        raise HTTPException(status_code=403, detail="Access Denied")
+        
+    if "DELETED" in (msg.flags or []):
+        is_admin = "SYSTEM_ADMIN" in (current_user.permissions or [])
+        is_owner = False
+        if channel.server_id:
+            server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == channel.server_id).first()
+            if server and server.owner_id == current_user.user_id:
+                is_owner = True
+        if not (is_admin or is_owner or current_user.user_id == msg.author_id):
+            raise HTTPException(status_code=403, detail="Not authorized to view deleted message content")
+
+    msg_dict = models.Message.from_orm(msg).dict()
+    author_user = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == msg.author_id).first()
+    if author_user:
+        msg_dict["author"] = models.UserResponse.from_orm(author_user).dict()
+        
+    if getattr(msg, "parent_id", 0) != 0:
+        parent_msg = db.query(db_models.DBMessage).filter(db_models.DBMessage.message_id == msg.parent_id).first()
+        if parent_msg:
+            p_dict = models.Message.from_orm(parent_msg).dict()
+            if "DELETED" in (p_dict.get("flags") or []):
+                p_dict["content"] = {"text": "", "attachments": [], "embeds": []}
+            p_author = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == parent_msg.author_id).first()
+            if p_author:
+                p_dict["author"] = models.UserResponse.from_orm(p_author).dict()
+            msg_dict["parent_message"] = p_dict
+
+    return msg_dict
 
 @app.get("/dms", response_model=list[models.ChannelResponse])
 def get_dms(current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):

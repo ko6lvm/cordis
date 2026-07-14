@@ -317,6 +317,8 @@ function App() {
   };
   const [selectedProfile, setSelectedProfile] = useState<{user: any, rect: DOMRect} | null>(null);
   const [contextMenu, setContextMenu] = useState<{x: number, y: number, user: any} | null>(null);
+  const [revealedMessages, setRevealedMessages] = useState<Record<number, any>>({});
+  const [msgContextMenu, setMsgContextMenu] = useState<{x: number, y: number, message: any} | null>(null);
 
   const currentUserRef = useRef<any>(null);
   useEffect(() => {
@@ -795,6 +797,23 @@ function App() {
         message_id: messageId
       }));
     }
+  };
+
+  const handleRevealMessage = async (messageId: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/messages/${messageId}`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const fullMsg = await res.json();
+        setRevealedMessages(prev => ({ ...prev, [messageId]: fullMsg }));
+      } else {
+        alert("Failed to reveal message. You might not have permission.");
+      }
+    } catch (e) {
+      console.error(e);
+    }
+    setMsgContextMenu(null);
   };
 
   const getMentionSuggestions = () => {
@@ -1750,7 +1769,21 @@ function App() {
                 </div>
                 
                 {isDeleted ? (
-                  <div className="msg-text tombstone" style={{color: 'var(--text-muted)', fontStyle: 'italic'}}>This message was deleted.</div>
+                  revealedMessages[m.message_id] ? (
+                    <div className="msg-text revealed-message" style={{opacity: 0.8, borderLeft: '2px solid var(--brand-primary)', paddingLeft: '8px'}}>
+                      <div style={{fontSize: '11px', color: 'var(--brand-primary)', fontWeight: 'bold', marginBottom: '4px'}}>Revealed Deleted Message:</div>
+                      {renderMessageText(revealedMessages[m.message_id].content?.text)}
+                      {revealedMessages[m.message_id].content?.attachments && revealedMessages[m.message_id].content.attachments.map((url: string, idx: number) => (
+                        <MessageAttachment key={idx} url={url} onLoad={scrollToBottom} />
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="msg-text tombstone" style={{color: 'var(--text-muted)', fontStyle: 'italic'}} onContextMenu={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setMsgContextMenu({x: e.pageX, y: e.pageY, message: m});
+                    }}>This message was deleted.</div>
+                  )
                 ) : (
                   editingMessageId === m.message_id ? (
                     <div className="msg-edit-container" style={{marginTop: '4px'}}>
@@ -2081,6 +2114,15 @@ function App() {
                 )}
               </>
             )}
+          </div>
+        </>
+      )}
+
+      {msgContextMenu && (
+        <>
+          <div style={{position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, zIndex: 99999}} onClick={() => setMsgContextMenu(null)} onContextMenu={(e) => { e.preventDefault(); setMsgContextMenu(null); }}></div>
+          <div style={{position: 'fixed', top: Math.min(msgContextMenu.y, window.innerHeight - 150), left: Math.min(msgContextMenu.x, window.innerWidth - 180), zIndex: 100000, backgroundColor: 'var(--bg-card)', borderRadius: '8px', padding: '8px', boxShadow: 'var(--shadow-lift)', minWidth: '150px', border: '1px solid var(--border-subtle)'}}>
+            <button className="dropdown-item" onClick={() => handleRevealMessage(msgContextMenu.message.message_id)}>Show message</button>
           </div>
         </>
       )}
