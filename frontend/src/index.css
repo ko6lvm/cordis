@@ -1216,7 +1216,8 @@ h1, h2, h3, h4, h5, h6 {
 .mention-badge {
   background-color: #f23f42;
   color: #fff;
-  font-size: 0.75rem;
+  font-size: 0.6rem;
+  letter-spacing: -0.02em;
   font-weight: 700;
   padding: 0 6px;
   border-radius: 8px;
@@ -1225,8 +1226,8 @@ h1, h2, h3, h4, h5, h6 {
   align-items: center;
   justify-content: center;
   position: absolute;
-  bottom: -4px;
-  right: -4px;
+  bottom: -5px;
+  right: -5px;
   border: 3px solid #1e1f22; /* Matches server sidebar bg */
   z-index: 20;
 }
