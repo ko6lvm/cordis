@@ -653,7 +653,7 @@ function App() {
         setUnreadStates(prev => ({
            ...prev,
            [channel.channel_id]: {
-             ...(prev[channel.channel_id] || { server_id: channel.server_id || null, mentions_count: 0 }),
+             ...(prev[channel.channel_id] || { server_id: channel.server_id || null, last_message_id: lastMsgId, mentions_count: 0 }),
              last_read_message_id: Math.max(prev[channel.channel_id]?.last_read_message_id || 0, lastMsgId),
              mentions_count: 0
            }
@@ -1748,7 +1748,7 @@ function App() {
                 </div>
                 <span style={{fontWeight: 500, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}} title={dm.target_user?.username ? `@${dm.target_user.username}` : undefined}>{dm.target_user?.display_name || dm.target_user?.username || 'Unknown User'}</span>
                 {mentionCount > 0 && (
-                  <div className="mention-badge" style={{position: 'static', transform: 'none', marginLeft: 'auto', fontSize: '11px', padding: '2px 6px', height: '16px', lineHeight: '12px', display: 'flex', alignItems: 'center', justifyContent: 'center'}}>{mentionCount}</div>
+                  <div className="mention-badge" style={{position: 'static', transform: 'none', marginLeft: 'auto', fontSize: '11px', padding: '0 4px', minWidth: '16px', height: '16px', lineHeight: '11px'}}>{mentionCount}</div>
                 )}
               </div>
             )})
