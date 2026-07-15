@@ -7,6 +7,15 @@ import EmojiPicker, { Theme } from 'emoji-picker-react';
 
 const API_BASE = import.meta.env.VITE_API_BASE || (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? "http://127.0.0.1:8000" : "");
 
+const playPingSound = () => {
+  try {
+    const audio = new Audio('/sounds/ping.mp3');
+    audio.play().catch(e => console.warn('Audio play failed:', e));
+  } catch (e) {
+    // Ignore error
+  }
+};
+
 const SERVER_ORDER_KEY = 'cordis_server_order';
 const PINNED_SERVER_KEY = 'cordis_pinned_server';
 const THEME_KEY = 'cordis_theme';
