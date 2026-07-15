@@ -1245,18 +1245,25 @@ def demote_user(user_id: int, current_user: db_models.DBUser = Depends(get_curre
 def get_sandbox():
     return FileResponse("index.html")
 
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+_FRONTEND_DIST = os.path.join(_BASE_DIR, "frontend", "dist")
+_FRONTEND_ASSETS = os.path.join(_FRONTEND_DIST, "assets")
+_UPLOADS_DIR = os.path.join(_BASE_DIR, "uploads")
+_FRONTEND_INDEX = os.path.join(_FRONTEND_DIST, "index.html")
+
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request, exc):
     if exc.status_code == 404:
-        # Avoid intercepting API routes
-        api_prefixes = ["/login", "/register", "/users", "/servers", "/channels", "/ws"]
-        if not any(request.url.path.startswith(prefix) for prefix in api_prefixes):
-            if os.path.exists("frontend/dist/index.html"):
-                return FileResponse("frontend/dist/index.html")
+        path = request.url.path
+        if path.startswith("/assets/") or path.startswith("/uploads/") or path.startswith("/api/"):
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        if "." in path.rsplit("/", 1)[-1]:
+            return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        api_prefixes = ["/login", "/register", "/users", "/servers", "/channels", "/ws", "/admin", "/dms", "/messages"]
+        if not any(path.startswith(prefix) for prefix in api_prefixes):
+            if os.path.exists(_FRONTEND_INDEX):
+                return FileResponse(_FRONTEND_INDEX)
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-
-if os.path.exists("frontend/dist"):
-    pass # we will mount it later
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
 
@@ -1276,8 +1283,27 @@ async def upload_file(file: UploadFile = File(...), upload_type: str = Form("att
     url = storage.upload_file_bytes(file_bytes, unique_filename, file.content_type, folder=upload_type)
     return {"url": url}
 
-if os.path.exists("uploads"):
-    app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
-    
-if os.path.exists("frontend/dist"):
-    app.mount("/", StaticFiles(directory="frontend/dist", html=True), name="frontend")
+if os.path.exists(_UPLOADS_DIR):
+    app.mount("/uploads", StaticFiles(directory=_UPLOADS_DIR), name="uploads")
+
+if os.path.isdir(_FRONTEND_ASSETS):
+    app.mount("/assets", StaticFiles(directory=_FRONTEND_ASSETS), name="frontend-assets")
+
+if os.path.isdir(_FRONTEND_DIST):
+    @app.get("/")
+    def serve_spa_index():
+        return FileResponse(_FRONTEND_INDEX)
+
+    @app.get("/favicon.svg")
+    def serve_favicon():
+        path = os.path.join(_FRONTEND_DIST, "favicon.svg")
+        if os.path.exists(path):
+            return FileResponse(path)
+        raise HTTPException(status_code=404)
+
+    @app.get("/icons.svg")
+    def serve_icons():
+        path = os.path.join(_FRONTEND_DIST, "icons.svg")
+        if os.path.exists(path):
+            return FileResponse(path)
+        raise HTTPException(status_code=404)

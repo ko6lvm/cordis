@@ -263,6 +263,36 @@ h1, h2, h3, h4, h5, h6 {
   background-color: var(--status-online);
   color: var(--text-on-brand);
 }
+.server-icon.dragging {
+  opacity: 0.45;
+  transform: scale(0.95);
+}
+.server-icon.drag-over {
+  box-shadow: 0 0 0 2px var(--brand-primary);
+  border-radius: var(--radius-lg);
+}
+.server-icon.pinned .server-pin-badge {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background-color: var(--brand-primary);
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 0 0 2px #1e1f22;
+  pointer-events: none;
+  z-index: 2;
+}
+.server-icon[draggable="true"] {
+  cursor: grab;
+}
+.server-icon[draggable="true"]:active {
+  cursor: grabbing;
+}
 
 /* Tooltips */
 [data-tooltip] {
@@ -1044,11 +1074,8 @@ h1, h2, h3, h4, h5, h6 {
   font-size: 0.75rem;
   font-weight: 700;
   padding: 0 6px;
-  border-radius: 12px;
-  min-width: 22px;
-  height: 22px;
-  line-height: 0.75rem; /* helps center numbers optically */
-  box-sizing: border-box;
+  border-radius: 8px;
+  height: 16px;
   display: flex;
   align-items: center;
   justify-content: center;
