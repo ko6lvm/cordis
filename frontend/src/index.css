@@ -415,6 +415,7 @@ h1, h2, h3, h4, h5, h6 {
   gap: 2px;
 }
 .channel-item {
+  position: relative;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -1172,7 +1173,18 @@ h1, h2, h3, h4, h5, h6 {
 
 .channel-item.unread {
   font-weight: 700;
-  color: var(--text-on-brand);
+  color: var(--text-on-brand) !important;
+}
+.channel-item.unread::before {
+  content: "";
+  position: absolute;
+  left: -8px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 4px;
+  height: 8px;
+  background-color: var(--text-on-brand);
+  border-radius: 0 4px 4px 0;
 }
 
 .message.mentioned {

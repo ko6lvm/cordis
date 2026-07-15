@@ -1,6 +1,15 @@
 # Frontend
+- **Unread states & Pings**: Displays a red dot with mention counts for direct messages (under DM tab/home icon) and server icons.
+- **DM Sidebar Pings**: When on the DM page, individual DM channel list items now render a red badge showing the unread mention count from that user.
+- **Dynamic DM Sidebar Refresh**: Received messages for new DMs that are not currently in the sidebar trigger an async refresh to fetch and list the new conversation in real-time.
+- **Modal Keyboard Shortcuts**: Users can use the `Esc` key to exit most active modals and overlay windows.
+- **Admin Panel UI**: The Moderator (Admin) Panel is now rendered as a fullscreen overlay rather than a fixed-width popup. The search bar is constrained in width for better UX on ultrawide displays, and the user result card now mimics the styling and layout of a standard profile popover, including rendering the user's joined servers.
 
 # Backend
+- **Admin Endpoints**: Added a `GET /admin/users/{user_id}/servers` endpoint to fetch the list of servers a user is a part of (requires SYSTEM_MOD or SYSTEM_ADMIN).
+- **Chronological Unread Verification**: Read state updates (`read_update`) and metric checks (`get_my_unreads`) now compare the chronological order using the `created_at` timestamp. This prevents legacy random 7-digit message IDs from permanently locking a channel into the unread state.
+- **Automatic Reply Pings**: Messages that are replies automatically include the parent message author's user ID in the `mentions` list to trigger a mention ping.
+- **DM Pings**: Every direct message automatically increments the recipient's unread mention counter.
 ## Requests
 ### User Profile & Registration
 * `POST /register`

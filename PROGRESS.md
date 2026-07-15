@@ -286,13 +286,21 @@ Broadcasted to all members of shared channels when a user goes online or offline
 
 Unreads and mention highlights are evaluated dynamically:
 1.  **Read States**: When a user views a channel, the client sends a `read_update` websocket message containing the latest message ID. The database updates `last_read_message_id` for that `(user_id, channel_id)` tuple.
-2.  **Mentions Indexing**: On `main.py` message reception, the server extracts potential mentions using the regex `re.findall(r'@([a-zA-Z0-9_]+)', text)`. Users who match are loaded from the database, and their user IDs are appended to the message's `mentions` array before saving.
-3.  **Metrics Query**: Calling `/users/me/unreads` executes this check:
-    *   Loads all channels the user belongs to.
+    *   *Chronological Progress*: To resolve issues with legacy random large message IDs, the backend verifies chronological progression. The `last_read_message_id` is only advanced if the newly read message has a greater `created_at` timestamp (or same timestamp and larger `message_id`) than the currently stored read message.
+2.  **Mentions Indexing**: On `main.py` message reception:
+    *   *Regular Mentions*: The server extracts potential mentions using the regex `re.findall(r'@([a-zA-Z0-9_]+)', text)`. Users who match are loaded from the database, and their user IDs are appended to the message's `mentions` array before saving.
+    *   *Reply Mentions*: If the message is a reply (non-zero `parent_id`), the author of the parent message is automatically added to the message's `mentions` array to trigger a reply ping.
+3.  **Metrics Query & Pings**: Calling `/users/me/unreads` executes this check:
+    *   Loads all channels (server channels + DM channels) the user belongs to.
     *   Fetches the user's `last_read_message_id` for each channel (defaulting to 0 if missing).
-    *   Queries all messages in that channel where `message_id > last_read_message_id`.
+    *   Queries all messages in that channel where the message is chronologically newer than the message associated with `last_read_message_id`.
     *   If the result set is not empty, the channel is marked as unread.
-    *   Counts messages where the user's ID exists in the `mentions` array to compute the active ping badge count.
+    *   *DM Pings*: For Direct Message (DM) channels, any message sent by the other party automatically increments the `mentions_count`.
+    *   *Server Mentions*: For server channels, a message only increments `mentions_count` if the current user's ID exists in the message's `mentions` array.
+4.  **UI Badges**:
+    *   *Red Dot Badge (Pings)*: DM chats and server icons show a red badge indicating the sum of unread mentions.
+    *   *DM Sidebar*: When viewing the Direct Messages tab, the sidebar lists each DM conversation with a corresponding red notification badge showing the number of unread mentions from that specific user.
+    *   *Dynamic List Update*: If a user receives a DM from a new contact while already viewing the DM page, the frontend intercepts the WS notification and triggers an asynchronous DM list refresh to render the new user in the sidebar immediately.
 
 ---
 

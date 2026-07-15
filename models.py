@@ -215,6 +215,7 @@ class UnreadState(BaseModel):
     last_read_message_id: int
     last_message_id: int
     mentions_count: int
+    has_unread: bool = False
 
 # ==========================================
 # 6. ADMIN SCHEMAS
@@ -224,4 +225,4 @@ class MuteRequest(BaseModel):
 
 class PromoteRequest(BaseModel):
     role: str
-
+

@@ -533,11 +533,7 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
                     current_read_msg = db.query(db_models.DBMessage).filter(db_models.DBMessage.message_id == read_state.last_read_message_id).first()
                     new_read_msg = db.query(db_models.DBMessage).filter(db_models.DBMessage.message_id == message_id).first()
                     
-                    if current_read_msg and new_read_msg:
-                        if new_read_msg.created_at > current_read_msg.created_at or (new_read_msg.created_at == current_read_msg.created_at and new_read_msg.message_id > current_read_msg.message_id):
-                            read_state.last_read_message_id = message_id
-                    elif not current_read_msg:
-                        # Fallback if the old read message no longer exists
+                    if new_read_msg:
                         read_state.last_read_message_id = message_id
                 db.commit()
                 continue
@@ -934,7 +930,8 @@ def get_my_unreads(current_user: db_models.DBUser = Depends(get_current_user), d
             server_id=server_id,
             last_read_message_id=last_read_id,
             last_message_id=last_msg_id,
-            mentions_count=mentions_count
+            mentions_count=mentions_count,
+            has_unread=len(new_msgs) > 0
         )
         
     return results
@@ -1467,7 +1464,7 @@ def get_single_message(message_id: int, current_user: db_models.DBUser = Depends
         raise HTTPException(status_code=403, detail="Access Denied")
         
     if "DELETED" in (msg.flags or []):
-        is_admin = "SYSTEM_ADMIN" in (current_user.permissions or [])
+        is_admin = "SYSTEM_ADMIN" in (current_user.permissions or []) or "SYSTEM_MOD" in (current_user.permissions or [])
         is_owner = False
         if channel.server_id:
             server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == channel.server_id).first()
@@ -1540,6 +1537,16 @@ def create_dm(dm_data: models.DMCreate, current_user: db_models.DBUser = Depends
     db.refresh(db_channel)
     db_channel.target_user = target_user
     return db_channel
+
+@app.get("/admin/users/{user_id}/servers", response_model=list[models.ServerResponse])
+def get_user_servers_admin(user_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    if "SYSTEM_ADMIN" not in (current_user.permissions or []) and "SYSTEM_MOD" not in (current_user.permissions or []):
+        raise HTTPException(status_code=403, detail="Not authorized")
+    target_user = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == user_id).first()
+    if not target_user:
+        raise HTTPException(status_code=404, detail="User not found")
+    servers = db.query(db_models.DBServer).all()
+    return [server_to_response(s, user_id) for s in servers if user_id in (s.members or [])]
 
 @app.post("/admin/ban/{user_id}")
 async def ban_user(user_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
