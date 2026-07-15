@@ -792,11 +792,15 @@ def get_user(user_id: int, current_user: db_models.DBUser = Depends(get_current_
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
-@app.get("/users/by-username/{username}", response_model=models.UserResponse)
+@app.get("/users/by-username/{username}", response_model=models.AdminUserResponse)
 def get_user_by_username(username: str, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     user = db.query(db_models.DBUser).filter(func.lower(db_models.DBUser.username) == username.lower()).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    
+    servers = db.query(db_models.DBServer).all()
+    joined_servers = [{"server_id": s.server_id, "server_name": s.server_name} for s in servers if user.user_id in s.members]
+    user.joined_servers = joined_servers
     return user
 
 @app.get("/servers/discover", response_model=list[models.ServerResponse])

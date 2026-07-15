@@ -185,4 +185,11 @@ class MuteRequest(BaseModel):
 
 class PromoteRequest(BaseModel):
     role: str
+
+class JoinedServer(BaseModel):
+    server_id: int
+    server_name: str
+
+class AdminUserResponse(UserResponse):
+    joined_servers: List[JoinedServer] = []
 
