@@ -97,11 +97,13 @@ class ServerResponse(BaseModel):
     server_image: str
     server_banner: Optional[str] = None
     members: List[int]
+    member_roles: Optional[dict] = None
     folders: int
     channels: int
     invite_code: Optional[str] = None
     is_public: Optional[bool] = False
     owner_id: int
+    my_role: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -116,6 +118,28 @@ class InvitePreview(BaseModel):
     total_members: int
     online_members: int
 
+class ServerMemberResponse(UserResponse):
+    server_role: str = "default"
+
+class MemberRoleUpdate(BaseModel):
+    role: str
+
+class CategoryCreate(BaseModel):
+    name: str
+
+class CategoryUpdate(BaseModel):
+    name: Optional[str] = None
+    position: Optional[int] = None
+
+class CategoryResponse(BaseModel):
+    category_id: int
+    server_id: int
+    name: str
+    position: int
+
+    class Config:
+        from_attributes = True
+
 
 # ==========================================
 # 4. CHANNEL SCHEMAS
@@ -123,7 +147,17 @@ class InvitePreview(BaseModel):
 class ChannelCreate(BaseModel):
     server_id: Optional[int] = None
     channel_name: str
-    channel_type: str
+    channel_type: str = "TEXT"
+    category_id: Optional[int] = None
+    view_roles: Optional[List[str]] = None
+    send_roles: Optional[List[str]] = None
+
+class ChannelUpdate(BaseModel):
+    channel_name: Optional[str] = None
+    category_id: Optional[int] = None
+    position: Optional[int] = None
+    view_roles: Optional[List[str]] = None
+    send_roles: Optional[List[str]] = None
 
 class DMCreate(BaseModel):
     target_user_id: int
@@ -135,6 +169,11 @@ class ChannelResponse(BaseModel):
     channel_type: str
     members: List[int]
     target_user: Optional[UserResponse] = None
+    category_id: Optional[int] = None
+    position: int = 0
+    view_roles: Optional[List[str]] = None
+    send_roles: Optional[List[str]] = None
+    can_send: Optional[bool] = True
 
     class Config:
         from_attributes = True
@@ -185,11 +224,4 @@ class MuteRequest(BaseModel):
 
 class PromoteRequest(BaseModel):
     role: str
-
-class JoinedServer(BaseModel):
-    server_id: int
-    server_name: str
-
-class AdminUserResponse(UserResponse):
-    joined_servers: List[JoinedServer] = []
 
