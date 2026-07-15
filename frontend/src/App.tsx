@@ -333,6 +333,13 @@ function App() {
   const [user, setUser] = useState<any>(null);
 
   // App State
+  const hasAppliedStartupNavRef = useRef(false);
+  const [pinnedServerId, setPinnedServerId] = useState<number | null>(loadPinnedServerId());
+  const [serverContextMenu, setServerContextMenu] = useState<{ x: number, y: number, server: any } | null>(null);
+  const [dragServerId, setDragServerId] = useState<number | null>(null);
+  const [dragOverServerId, setDragOverServerId] = useState<number | null>(null);
+  const serverDragMovedRef = useRef(false);
+
   const [servers, setServers] = useState<any[]>([]);
   const [activeServer, setActiveServer] = useState<any>(null);
   const [channels, setChannels] = useState<any[]>([]);
