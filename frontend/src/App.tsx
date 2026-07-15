@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Compass, Plus, Hash, LogOut, Send, Loader2, Settings, Users, Home, MessageSquare, Check, X, AlertTriangle, Pencil, Trash2, Reply, File as FileIcon, UploadCloud, Download, Hammer, Play, Pause, Smile, Pin, Sun, Moon, ChevronDown, ChevronRight, FolderPlus, Shield } from 'lucide-react';
+import { Compass, Plus, Hash, LogOut, Send, Loader2, Settings, Users, Home, MessageSquare, Check, X, AlertTriangle, Pencil, Trash2, Reply, File as FileIcon, UploadCloud, Download, Hammer, Play, Pause, Smile, Pin, Sun, Moon, ChevronDown, ChevronRight, FolderPlus, Shield, Menu } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import EmojiPicker, { Theme } from 'emoji-picker-react';
 
@@ -360,7 +360,7 @@ function App() {
   const [dms, setDms] = useState<any[]>([]);
   const [isViewingDMs, setIsViewingDMs] = useState(true);
   
-  // Loading States 
+  // Loading States
   const [isLoadingAuth, setIsLoadingAuth] = useState(false);
   const [isLoadingServers, setIsLoadingServers] = useState(false);
   const [isLoadingChannels, setIsLoadingChannels] = useState(false);
@@ -379,9 +379,6 @@ function App() {
   const [unreadStates, setUnreadStates] = useState<Record<number, { server_id: number | null, last_read_message_id: number, last_message_id: number, mentions_count: number }>>({});
   const activeChannelRef = useRef<any>(null);
   useEffect(() => { activeChannelRef.current = activeChannel; }, [activeChannel]);
-  const activeServerRef = useRef<any>(null);
-  useEffect(() => { activeServerRef.current = activeServer; }, [activeServer]);
-  const fetchServerMembersAndPresenceRef = useRef<any>(null);
   const dmsRef = useRef<any[]>([]);
   const serversRef = useRef<any[]>([]);
   const selectChannelRef = useRef<any>(null);
@@ -528,6 +525,37 @@ function App() {
   const [revealedMessages, setRevealedMessages] = useState<Record<number, any>>({});
   const [msgContextMenu, setMsgContextMenu] = useState<{x: number, y: number, message: any} | null>(null);
 
+  // Mobile navigation
+  const [isMobile, setIsMobile] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches
+  );
+  const [mobileNavOpen, setMobileNavOpen] = useState(() =>
+    typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches
+  );
+  const [mobileMembersOpen, setMobileMembersOpen] = useState(false);
+  const [activeMessageId, setActiveMessageId] = useState<number | null>(null);
+
+  useEffect(() => {
+    const mq = window.matchMedia('(max-width: 768px)');
+    const onChange = () => {
+      const mobile = mq.matches;
+      setIsMobile(mobile);
+      if (mobile) {
+        setShowMemberList(false);
+        setMobileMembersOpen(false);
+        // Open nav when landing on mobile with no channel selected
+        setMobileNavOpen((prev) => prev || !activeChannelRef.current);
+      } else {
+        setShowMemberList(true);
+        setMobileNavOpen(false);
+        setMobileMembersOpen(false);
+      }
+    };
+    onChange();
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
+
   const currentUserRef = useRef<any>(null);
   useEffect(() => {
     currentUserRef.current = user;
@@ -668,10 +696,6 @@ function App() {
     }
   };
 
-  useEffect(() => {
-    fetchServerMembersAndPresenceRef.current = fetchServerMembersAndPresence;
-  });
-
   const loadServerChannelsAndCategories = async (serverId: number) => {
     const [chanRes, catRes] = await Promise.all([
       fetch(`${API_BASE}/servers/${serverId}/channels`, { headers: { Authorization: `Bearer ${token}` } }),
@@ -739,6 +763,9 @@ function App() {
     setMessages([]);
     setCategories([]);
     if (ws) { ws.close(); setWs(null); }
+    // Keep channel list open on mobile so user can pick a channel
+    if (isMobile) setMobileNavOpen(true);
+    setMobileMembersOpen(false);
     
     fetchServerMembersAndPresence(server.server_id);
     
@@ -746,6 +773,8 @@ function App() {
     try {
       const data = await loadServerChannelsAndCategories(server.server_id);
       if (data.length > 0) {
+        // On mobile, auto-open first channel only if user already had a channel context;
+        // always select so chat is ready, but keep nav open briefly is handled in selectChannel closing it.
         selectChannel(data[0]);
       }
     } finally {
@@ -754,6 +783,8 @@ function App() {
   };
 
   const startDM = async (targetUserId: number) => {
+    setSelectedProfile(null);
+    setMobileMembersOpen(false);
     try {
       const res = await fetch(`${API_BASE}/dms`, {
         method: "POST",
@@ -783,6 +814,9 @@ function App() {
 
   const selectChannel = async (channel: any) => {
     setActiveChannel(channel);
+    setMobileNavOpen(false);
+    setMobileMembersOpen(false);
+    setActiveMessageId(null);
 
     if (wsRef.current) {
       wsRef.current.onmessage = null;
@@ -857,10 +891,6 @@ function App() {
       } else if (data.type === 'ban_update') {
         if (currentUserRef.current) {
           setUser({ ...currentUserRef.current, status: data.status });
-        }
-      } else if (data.type === 'member_update') {
-        if (activeServerRef.current && activeServerRef.current.server_id === data.server_id) {
-          fetchServerMembersAndPresenceRef.current?.(data.server_id);
         }
       } else if (data.type === 'unread_notification') {
         setUnreadStates(prev => {
@@ -1522,6 +1552,7 @@ function App() {
       setSettingsProfilePic(user.profile_picture || '');
       setSettingsBanner(user.banner || '');
       setShowSettings(true);
+      if (isMobile) setMobileNavOpen(false);
     }
   };
 
@@ -1532,6 +1563,7 @@ function App() {
       setServerImage(activeServer.server_image || '');
       setServerBanner(activeServer.server_banner || '');
       setShowServerSettings(true);
+      if (isMobile) setMobileNavOpen(false);
     }
   };
 
@@ -2208,10 +2240,12 @@ function App() {
     </div>
   );
 
+  const membersVisible = isMobile ? mobileMembersOpen : showMemberList;
+
   return (
     <div 
       {...getRootProps()}
-      className="app-layout"
+      className={`app-layout${isMobile ? ' is-mobile' : ''}${mobileNavOpen ? ' mobile-nav-open' : ''}${membersVisible ? ' members-open' : ''}`}
     >
       <input {...getInputProps()} />
       {isDragActive && (
@@ -2232,9 +2266,20 @@ function App() {
             </div>
           </div>
       )}
+
+      {isMobile && (mobileNavOpen || mobileMembersOpen) && (
+        <div
+          className="mobile-drawer-overlay"
+          onClick={() => {
+            setMobileNavOpen(false);
+            setMobileMembersOpen(false);
+          }}
+        />
+      )}
+
       {/* Server Sidebar */}
       <div className="panel server-sidebar">
-        <div className={`server-icon ${isViewingDMs ? 'active' : ''}`} onClick={() => { setIsViewingDMs(true); setActiveServer(null); setActiveChannel(null); setMessages([]); }} data-tooltip="Direct Messages">
+        <div className={`server-icon ${isViewingDMs ? 'active' : ''}`} onClick={() => { setIsViewingDMs(true); setActiveServer(null); setActiveChannel(null); setMessages([]); if (isMobile) setMobileNavOpen(true); setMobileMembersOpen(false); }} data-tooltip="Direct Messages">
           {isViewingDMs && <div className="active-pill" />}
           {!isViewingDMs && serverUnreadStatus[0] && <div className="unread-dot" />}
           <Home size={24} color={isViewingDMs ? '#fff' : 'var(--text-main)'} />
@@ -2243,7 +2288,7 @@ function App() {
         <div className="server-separator" />
         {(user?.permissions?.includes('SYSTEM_ADMIN') || user?.permissions?.includes('SYSTEM_MOD')) && (
           <>
-            <div className={`server-icon ${showAdminPanel ? 'active' : ''}`} onClick={() => setShowAdminPanel(true)} data-tooltip="Administration">
+            <div className={`server-icon ${showAdminPanel ? 'active' : ''}`} onClick={() => { setShowAdminPanel(true); if (isMobile) setMobileNavOpen(false); }} data-tooltip="Administration">
               {showAdminPanel && <div className="active-pill" />}
               <Hammer size={24} color={showAdminPanel ? '#fff' : 'var(--text-main)'} />
             </div>
@@ -2323,10 +2368,10 @@ function App() {
           })
         )}
         <div className="server-separator" />
-        <div className="server-icon action" onClick={() => setShowCreateServer(true)} data-tooltip="Create Server">
+        <div className="server-icon action" onClick={() => { setShowCreateServer(true); if (isMobile) setMobileNavOpen(false); }} data-tooltip="Create Server">
           <Plus size={24} />
         </div>
-        <div className="server-icon discover" onClick={openDiscover} data-tooltip="Discover">
+        <div className="server-icon discover" onClick={() => { openDiscover(); if (isMobile) setMobileNavOpen(false); }} data-tooltip="Discover">
           <Compass size={24} />
         </div>
       </div>
@@ -2334,7 +2379,7 @@ function App() {
       {/* Channels Sidebar */}
       <div className="panel channel-sidebar">
         <div className="server-header" style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', height: 'auto', padding: '12px 16px', borderBottom: '1px solid var(--border-subtle)'}}>
-          <div style={{flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column'}}>
+          <div style={{flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minWidth: 0}}>
             {isViewingDMs ? (
               <div style={{fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap'}}>
                 Direct Messages
@@ -2376,20 +2421,33 @@ function App() {
               </>
             )}
           </div>
-          {activeServer && user && (
-            <div style={{display: 'flex', gap: '4px'}}>
-              {(activeServer.owner_id === user.user_id || isServerAdmin) && (
-                <button className="icon-btn" onClick={(e) => { e.stopPropagation(); openServerSettings(); }} title="Server Settings">
-                  <Settings size={18} />
-                </button>
-              )}
-              {activeServer.owner_id !== user.user_id && activeServer.invite_code !== 'GLOBAL' && (
-                <button className="icon-btn" onClick={(e) => { e.stopPropagation(); leaveServer(); }} title="Leave Server" disabled={isLeavingServer}>
-                  <LogOut size={18} />
-                </button>
-              )}
-            </div>
-          )}
+          <div style={{display: 'flex', gap: '4px', flexShrink: 0, alignItems: 'center'}}>
+            {activeServer && user && (
+              <>
+                {(activeServer.owner_id === user.user_id || isServerAdmin) && (
+                  <button className="icon-btn" onClick={(e) => { e.stopPropagation(); openServerSettings(); if (isMobile) setMobileNavOpen(false); }} title="Server Settings">
+                    <Settings size={18} />
+                  </button>
+                )}
+                {activeServer.owner_id !== user.user_id && activeServer.invite_code !== 'GLOBAL' && (
+                  <button className="icon-btn" onClick={(e) => { e.stopPropagation(); leaveServer(); }} title="Leave Server" disabled={isLeavingServer}>
+                    <LogOut size={18} />
+                  </button>
+                )}
+              </>
+            )}
+            {isMobile && (
+              <button
+                type="button"
+                className="icon-btn mobile-close-nav"
+                onClick={() => setMobileNavOpen(false)}
+                title="Close menu"
+                aria-label="Close menu"
+              >
+                <X size={18} />
+              </button>
+            )}
+          </div>
         </div>
         <div className="channel-list">
           {isViewingDMs ? (
@@ -2519,15 +2577,30 @@ function App() {
 
       <div className="chat-area">
         <div className="chat-header" style={{justifyContent: 'space-between'}}>
-          <div style={{display: 'flex', alignItems: 'center', gap: '8px'}}>
+          <div style={{display: 'flex', alignItems: 'center', gap: '8px', minWidth: 0, flex: 1}}>
+            {isMobile && (
+              <button
+                type="button"
+                className="icon-btn mobile-nav-toggle"
+                onClick={() => {
+                  setMobileNavOpen(true);
+                  setMobileMembersOpen(false);
+                  setSelectedProfile(null);
+                }}
+                title="Open navigation"
+                aria-label="Open navigation"
+              >
+                <Menu size={22} />
+              </button>
+            )}
             {isViewingDMs ? (
               <>
-                <MessageSquare size={24} style={{color: 'var(--text-muted)'}} />
-                <div className="chat-title">{renderUsernameWithBadges(activeChannel?.target_user)}</div>
+                <MessageSquare size={24} style={{color: 'var(--text-muted)', flexShrink: 0}} className="chat-header-icon" />
+                <div className="chat-title">{renderUsernameWithBadges(activeChannel?.target_user) || (isMobile ? 'Messages' : '')}</div>
               </>
             ) : (
               <>
-                <Hash size={24} style={{color: 'var(--text-muted)'}} />
+                <Hash size={24} style={{color: 'var(--text-muted)', flexShrink: 0}} className="chat-header-icon" />
                 <div className="chat-title">{activeChannel?.channel_name || 'Select a channel'}</div>
               </>
             )}
@@ -2535,16 +2608,43 @@ function App() {
           {activeChannel && (
             <button 
               className="icon-btn" 
-              onClick={() => setShowMemberList(!showMemberList)} 
+              onClick={() => {
+                if (isMobile) {
+                  setMobileMembersOpen((v) => !v);
+                  setMobileNavOpen(false);
+                } else {
+                  setShowMemberList(!showMemberList);
+                }
+              }} 
               title={isViewingDMs ? "Toggle User Profile" : "Toggle Member List"}
-              style={{color: showMemberList ? 'var(--text-heading)' : 'var(--text-muted)'}}
+              style={{color: membersVisible ? 'var(--text-heading)' : 'var(--text-muted)', flexShrink: 0}}
             >
               <Users size={20} />
             </button>
           )}
         </div>
         
-        <div className="message-list" onClick={() => setSelectedProfile(null)}>
+        <div className="message-list" onClick={() => { setSelectedProfile(null); setActiveMessageId(null); }}>
+          {!activeChannel && (
+            <div className="mobile-empty-chat">
+              <MessageSquare size={40} style={{ color: 'var(--text-muted)', marginBottom: 12 }} />
+              <p style={{ color: 'var(--text-muted)', textAlign: 'center', fontSize: '0.95rem', lineHeight: 1.5, maxWidth: 280 }}>
+                {isMobile
+                  ? 'Tap the menu button to pick a server, channel, or direct message.'
+                  : 'Select a channel or direct message to start chatting.'}
+              </p>
+              {isMobile && (
+                <button
+                  type="button"
+                  className="btn"
+                  style={{ marginTop: 16 }}
+                  onClick={() => setMobileNavOpen(true)}
+                >
+                  <Menu size={18} /> Open menu
+                </button>
+              )}
+            </div>
+          )}
           {messages.map((m, i) => {
             const isMentioned = currentUserRef.current && m.mentions?.includes(currentUserRef.current.user_id);
             const isDeleted = m.flags?.includes("DELETED");
@@ -2553,7 +2653,17 @@ function App() {
             const canDelete = canEdit || (activeServer && currentUserRef.current?.user_id === activeServer.owner_id);
             
             return (
-            <div key={m.message_id ?? i} id={`message-${m.message_id}`} className={`message ${isMentioned ? 'mentioned' : ''} ${isDeleted ? 'deleted' : ''}`} style={{display: 'flex', gap: '16px', position: 'relative', flexDirection: 'column'}}>
+            <div
+              key={m.message_id ?? i}
+              id={`message-${m.message_id}`}
+              className={`message ${isMentioned ? 'mentioned' : ''} ${isDeleted ? 'deleted' : ''} ${activeMessageId === m.message_id ? 'msg-active' : ''}`}
+              style={{display: 'flex', gap: '16px', position: 'relative', flexDirection: 'column'}}
+              onClick={(e) => {
+                if (!isMobile) return;
+                e.stopPropagation();
+                setActiveMessageId((prev) => (prev === m.message_id ? null : m.message_id));
+              }}
+            >
               {m.parent_message && (
                 <div 
                   className="inline-quote" 
@@ -2719,7 +2829,11 @@ function App() {
               </div>
               
               {!isDeleted && editingMessageId !== m.message_id && (
-                <div className={`msg-actions ${showEmojiPicker === m.message_id || showFullEmojiPicker === m.message_id ? 'force-show' : ''}`} style={{position: 'relative'}}>
+                <div
+                  className={`msg-actions ${showEmojiPicker === m.message_id || showFullEmojiPicker === m.message_id || activeMessageId === m.message_id ? 'force-show' : ''}`}
+                  style={{position: 'relative'}}
+                  onClick={(e) => e.stopPropagation()}
+                >
                   <button className="icon-btn action-btn" onClick={() => setShowEmojiPicker(showEmojiPicker === m.message_id ? null : m.message_id)} title="Add Reaction">
                     <Smile size={16} />
                   </button>
@@ -2848,8 +2962,16 @@ function App() {
         </div>
       </div>
       
-      {showMemberList && activeChannel && (
+      {membersVisible && activeChannel && (
         <div className="member-list">
+          {isMobile && (
+            <div className="mobile-members-header">
+              <h3 className="member-group-title" style={{ margin: 0 }}>{isViewingDMs ? 'Members' : 'Server members'}</h3>
+              <button type="button" className="icon-btn" onClick={() => setMobileMembersOpen(false)} aria-label="Close members">
+                <X size={18} />
+              </button>
+            </div>
+          )}
           {isViewingDMs ? (
             <>
               <h3 className="member-group-title">Members — 2</h3>
@@ -2954,15 +3076,38 @@ function App() {
         </div>
       )}
 
+      {selectedProfile && isMobile && (
+        <div className="mobile-drawer-overlay profile-overlay" onClick={() => setSelectedProfile(null)} />
+      )}
       {selectedProfile && (
         <div 
-          className="profile-popover" 
-          style={{
+          className={`profile-popover${isMobile ? ' profile-popover-mobile' : ''}`}
+          style={isMobile ? {
+            top: '50%',
+            left: '50%',
+            transform: 'translate(-50%, -50%)',
+            position: 'fixed',
+            maxHeight: 'min(85vh, 520px)',
+            overflowY: 'auto',
+            width: 'min(340px, calc(100vw - 32px))',
+            zIndex: 10050,
+          } : {
             top: `${Math.min(selectedProfile.rect.top, window.innerHeight - 300)}px`,
             left: `${selectedProfile.rect.left > window.innerWidth - 350 ? selectedProfile.rect.left - 320 : selectedProfile.rect.right + 10}px`
           }}
           onClick={(e) => e.stopPropagation()}
         >
+          {isMobile && (
+            <button
+              type="button"
+              className="icon-btn profile-popover-close"
+              onClick={() => setSelectedProfile(null)}
+              aria-label="Close profile"
+              style={{ position: 'absolute', top: 8, right: 8, zIndex: 2, background: 'rgba(0,0,0,0.35)', color: '#fff' }}
+            >
+              <X size={18} />
+            </button>
+          )}
           <div className="popover-header">
             {selectedProfile.user.banner && (
               <img

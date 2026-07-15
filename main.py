@@ -7,7 +7,7 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, WebSocket, Depends, WebSocketDisconnect, HTTPException, status, Query, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, WebSocket, Depends, WebSocketDisconnect, HTTPException, status, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.staticfiles import StaticFiles
@@ -385,34 +385,7 @@ class ConnectionManager:
                     except:
                         pass
 
-    async def broadcast_to_server(self, server_id: int, message_data: dict, db: Session):
-        server_channels = db.query(db_models.DBChannel).filter(db_models.DBChannel.server_id == server_id).all()
-        for ch in server_channels:
-            if ch.channel_id in self.active_connections:
-                for connection in self.active_connections[ch.channel_id]:
-                    try:
-                        await connection.send_json(message_data)
-                    except:
-                        pass
-
 manager = ConnectionManager()
-
-async def broadcast_member_update(server_id: int):
-    db = next(get_db())
-    try:
-        await manager.broadcast_to_server(server_id, {"type": "member_update", "server_id": server_id}, db)
-    finally:
-        db.close()
-
-async def broadcast_user_update(user_id: int):
-    db = next(get_db())
-    try:
-        servers = db.query(db_models.DBServer).all()
-        for srv in servers:
-            if srv.members and user_id in srv.members:
-                await manager.broadcast_to_server(srv.server_id, {"type": "member_update", "server_id": srv.server_id}, db)
-    finally:
-        db.close()
 
 async def fetch_link_metadata_task(channel_id: int, message_id: int, url: str):
     db = next(get_db())
@@ -530,15 +503,7 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
                     read_state = db_models.DBChannelReadState(user_id=user.user_id, channel_id=channel_id, last_read_message_id=message_id)
                     db.add(read_state)
                 else:
-                    current_read_msg = db.query(db_models.DBMessage).filter(db_models.DBMessage.message_id == read_state.last_read_message_id).first()
-                    new_read_msg = db.query(db_models.DBMessage).filter(db_models.DBMessage.message_id == message_id).first()
-                    
-                    if current_read_msg and new_read_msg:
-                        if new_read_msg.created_at > current_read_msg.created_at or (new_read_msg.created_at == current_read_msg.created_at and new_read_msg.message_id > current_read_msg.message_id):
-                            read_state.last_read_message_id = message_id
-                    elif not current_read_msg:
-                        # Fallback if the old read message no longer exists
-                        read_state.last_read_message_id = message_id
+                    read_state.last_read_message_id = max(read_state.last_read_message_id, message_id)
                 db.commit()
                 continue
 
@@ -846,7 +811,7 @@ def get_me(current_user: db_models.DBUser = Depends(get_current_user)):
     return current_user
 
 @app.put("/users/me", response_model=models.UserResponse)
-def update_me(update_data: models.UserUpdate, background_tasks: BackgroundTasks, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def update_me(update_data: models.UserUpdate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if update_data.username != current_user.username:
         existing = db.query(db_models.DBUser).filter(func.lower(db_models.DBUser.username) == update_data.username.lower()).first()
         if existing:
@@ -875,7 +840,6 @@ def update_me(update_data: models.UserUpdate, background_tasks: BackgroundTasks,
         
     db.commit()
     db.refresh(current_user)
-    background_tasks.add_task(broadcast_user_update, current_user.user_id)
     return current_user
 
 @app.get("/users/me/unreads", response_model=dict[int, models.UnreadState])
@@ -1088,7 +1052,7 @@ def delete_server(server_id: int, current_user: db_models.DBUser = Depends(get_c
     return {"status": "success", "detail": "Server deleted" if server.owner_id == current_user.user_id else "Server removed"}
 
 @app.post("/servers/{server_id}/leave")
-def leave_server(server_id: int, background_tasks: BackgroundTasks, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def leave_server(server_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -1114,7 +1078,6 @@ def leave_server(server_id: int, background_tasks: BackgroundTasks, current_user
             channel.members = updated_channel_members
             
     db.commit()
-    background_tasks.add_task(broadcast_member_update, server_id)
     return {"status": "success", "detail": "Left server"}
 
 @app.get("/servers/{server_id}/members", response_model=list[models.ServerMemberResponse])
@@ -1134,7 +1097,7 @@ def get_server_members(server_id: int, current_user: db_models.DBUser = Depends(
     return result
 
 @app.put("/servers/{server_id}/members/{user_id}/role", response_model=models.ServerMemberResponse)
-def set_server_member_role(server_id: int, user_id: int, body: models.MemberRoleUpdate, background_tasks: BackgroundTasks, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def set_server_member_role(server_id: int, user_id: int, body: models.MemberRoleUpdate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -1155,11 +1118,10 @@ def set_server_member_role(server_id: int, user_id: int, body: models.MemberRole
     user = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == user_id).first()
     data = models.UserResponse.from_orm(user).dict()
     data["server_role"] = role
-    background_tasks.add_task(broadcast_member_update, server_id)
     return data
 
 @app.post("/servers/{server_id}/members/{user_id}/kick")
-def kick_server_member(server_id: int, user_id: int, background_tasks: BackgroundTasks, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def kick_server_member(server_id: int, user_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -1194,7 +1156,6 @@ def kick_server_member(server_id: int, user_id: int, background_tasks: Backgroun
             ch.members = cm
             flag_modified(ch, "members")
     db.commit()
-    background_tasks.add_task(broadcast_member_update, server_id)
     return {"status": "success", "detail": "Member removed"}
 
 @app.get("/servers/{server_id}/presence", response_model=list[int])
@@ -1229,7 +1190,7 @@ def get_invite_preview(invite_code: str, db: Session = Depends(get_db)):
     }
 
 @app.post("/servers/join-by-invite/{invite_code}")
-def join_by_invite(invite_code: str, background_tasks: BackgroundTasks, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def join_by_invite(invite_code: str, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     server = db.query(db_models.DBServer).filter(db_models.DBServer.invite_code == invite_code).first()
     if not server:
         raise HTTPException(status_code=404, detail="Invalid invite code")
@@ -1249,7 +1210,6 @@ def join_by_invite(invite_code: str, background_tasks: BackgroundTasks, current_
                     channel.members = updated_channel_members
         
         db.commit()
-    background_tasks.add_task(broadcast_member_update, server.server_id)
     return {"status": "success", "detail": f"Joined server"}
 
 @app.get("/servers/{server_id}/categories", response_model=list[models.CategoryResponse])
