@@ -30,6 +30,7 @@ db_models.Base.metadata.create_all(bind=engine)
 app = FastAPI()
 
 SYSTEM_USER_ID = None
+ALL_ROLES = ["default", "mod", "admin"]
 
 def is_system_user(user_id: int, db: Session = None) -> bool:
     global SYSTEM_USER_ID
@@ -69,6 +70,20 @@ def startup_event():
             db.commit()
         except Exception:
             db.rollback()
+
+        for stmt in [
+            "ALTER TABLE servers ADD COLUMN member_roles JSON",
+            "ALTER TABLE channels ADD COLUMN category_id INTEGER",
+            "ALTER TABLE channels ADD COLUMN position INTEGER DEFAULT 0",
+            "ALTER TABLE channels ADD COLUMN view_roles JSON",
+            "ALTER TABLE channels ADD COLUMN send_roles JSON",
+        ]:
+            try:
+                from sqlalchemy import text
+                db.execute(text(stmt))
+                db.commit()
+            except Exception:
+                db.rollback()
 
         system_user = db.query(db_models.DBUser).filter(func.lower(db_models.DBUser.username) == "system").first()
         desired_hash = "$2b$12$nIW.6/aVmj9CGIlmVEsfa.hQ9XG.qGETc34QFULL21eISUUIKmsCG"
@@ -123,17 +138,112 @@ def startup_event():
                 server_id=global_server.server_id,
                 channel_name="general",
                 channel_type="text",
-                members=[system_user.user_id]
+                members=[system_user.user_id],
+                category_id=None,
+                position=0,
+                view_roles=list(ALL_ROLES),
+                send_roles=list(ALL_ROLES),
             )
             db.add(general_channel)
             global_server.channels = 1
+            global_server.member_roles = {str(system_user.user_id): "admin"}
             db.commit()
         else:
             if global_server.server_name == "Global Hub":
                 global_server.server_name = "General"
                 db.commit()
+
+        from sqlalchemy.orm.attributes import flag_modified as _flag_mod
+        for ch in db.query(db_models.DBChannel).filter(db_models.DBChannel.server_id != None).all():
+            changed = False
+            if not ch.view_roles:
+                ch.view_roles = list(ALL_ROLES)
+                changed = True
+            if not ch.send_roles:
+                ch.send_roles = list(ALL_ROLES)
+                changed = True
+            if ch.position is None:
+                ch.position = 0
+                changed = True
+            if changed:
+                _flag_mod(ch, "view_roles")
+                _flag_mod(ch, "send_roles")
+        for srv in db.query(db_models.DBServer).all():
+            if not srv.member_roles:
+                roles = {}
+                for mid in (srv.members or []):
+                    roles[str(mid)] = "admin" if mid == srv.owner_id else "default"
+                srv.member_roles = roles
+                _flag_mod(srv, "member_roles")
+        db.commit()
     finally:
         db.close()
+
+def get_member_role(server: db_models.DBServer, user_id: int) -> str:
+    if not server:
+        return "default"
+    if server.owner_id == user_id:
+        return "admin"
+    roles = server.member_roles or {}
+    return roles.get(str(user_id), "default")
+
+def set_member_role(server: db_models.DBServer, user_id: int, role: str):
+    roles = dict(server.member_roles or {})
+    roles[str(user_id)] = role
+    server.member_roles = roles
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(server, "member_roles")
+
+def can_manage_channels(server: db_models.DBServer, user_id: int) -> bool:
+    return get_member_role(server, user_id) == "admin"
+
+def can_kick_members(server: db_models.DBServer, user_id: int) -> bool:
+    return get_member_role(server, user_id) in ("mod", "admin")
+
+def can_view_channel(channel: db_models.DBChannel, server: Optional[db_models.DBServer], user_id: int) -> bool:
+    if channel.server_id is None:
+        return user_id in (channel.members or [])
+    if not server or user_id not in (server.members or []):
+        return False
+    if server.owner_id == user_id:
+        return True
+    view = channel.view_roles or list(ALL_ROLES)
+    return get_member_role(server, user_id) in view
+
+def can_send_in_channel(channel: db_models.DBChannel, server: Optional[db_models.DBServer], user_id: int) -> bool:
+    if not can_view_channel(channel, server, user_id):
+        return False
+    if channel.server_id is None:
+        return True
+    if server and server.owner_id == user_id:
+        return True
+    send = channel.send_roles or list(ALL_ROLES)
+    return get_member_role(server, user_id) in send
+
+def sync_channel_members_from_roles(channel: db_models.DBChannel, server: db_models.DBServer):
+    view = channel.view_roles or list(ALL_ROLES)
+    members = []
+    for mid in (server.members or []):
+        if server.owner_id == mid or get_member_role(server, mid) in view:
+            members.append(mid)
+    channel.members = members
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(channel, "members")
+
+def channel_to_response(channel: db_models.DBChannel, server: Optional[db_models.DBServer], user_id: int, target_user=None) -> dict:
+    return {
+        "channel_id": channel.channel_id,
+        "server_id": channel.server_id,
+        "channel_name": channel.channel_name,
+        "channel_type": channel.channel_type,
+        "members": channel.members or [],
+        "category_id": channel.category_id,
+        "position": channel.position or 0,
+        "view_roles": channel.view_roles or list(ALL_ROLES),
+        "send_roles": channel.send_roles or list(ALL_ROLES),
+        "can_send": can_send_in_channel(channel, server, user_id),
+        "target_user": target_user,
+    }
 
 def ensure_user_in_global_hub(user_id: int, db: Session):
     global_server = db.query(db_models.DBServer).filter(db_models.DBServer.invite_code == "GLOBAL").first()
@@ -142,13 +252,14 @@ def ensure_user_in_global_hub(user_id: int, db: Session):
         if user_id not in members:
             members.append(user_id)
             global_server.members = members
-            
+            set_member_role(global_server, user_id, "default")
             channels = db.query(db_models.DBChannel).filter(db_models.DBChannel.server_id == global_server.server_id).all()
             for channel in channels:
-                chan_members = list(channel.members) if channel.members else []
-                if user_id not in chan_members:
-                    chan_members.append(user_id)
-                    channel.members = chan_members
+                if can_view_channel(channel, global_server, user_id):
+                    chan_members = list(channel.members) if channel.members else []
+                    if user_id not in chan_members:
+                        chan_members.append(user_id)
+                        channel.members = chan_members
             db.commit()
 
 app.add_middleware(
@@ -359,8 +470,11 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
         return
 
     channel = db.query(db_models.DBChannel).filter(db_models.DBChannel.channel_id == channel_id).first()
+    server = None
+    if channel and channel.server_id is not None:
+        server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == channel.server_id).first()
     
-    if not channel or user.user_id not in channel.members:
+    if not channel or not can_view_channel(channel, server, user.user_id):
         await websocket.accept()
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Access Denied: Not a member.")
         return
@@ -540,6 +654,10 @@ async def websocket_endpoint(websocket: WebSocket, channel_id: int, token: str =
 
             if user.muted_until and user.muted_until > int(time.time()):
                 await websocket.send_json({"type": "error", "message": "You are currently muted."})
+                continue
+
+            if not can_send_in_channel(channel, server, user.user_id):
+                await websocket.send_json({"type": "error", "message": "You cannot send messages in this channel."})
                 continue
 
             validated_msg = models.MessageSend(**raw_data)
@@ -792,15 +910,11 @@ def get_user(user_id: int, current_user: db_models.DBUser = Depends(get_current_
         raise HTTPException(status_code=404, detail="User not found")
     return user
 
-@app.get("/users/by-username/{username}", response_model=models.AdminUserResponse)
+@app.get("/users/by-username/{username}", response_model=models.UserResponse)
 def get_user_by_username(username: str, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     user = db.query(db_models.DBUser).filter(func.lower(db_models.DBUser.username) == username.lower()).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    
-    servers = db.query(db_models.DBServer).all()
-    joined_servers = [{"server_id": s.server_id, "server_name": s.server_name} for s in servers if user.user_id in s.members]
-    user.joined_servers = joined_servers
     return user
 
 @app.get("/servers/discover", response_model=list[models.ServerResponse])
@@ -808,10 +922,27 @@ def discover_servers(db: Session = Depends(get_db)):
     servers = db.query(db_models.DBServer).filter(db_models.DBServer.is_public == True).all()
     return servers
 
+def server_to_response(server: db_models.DBServer, user_id: int) -> dict:
+    return {
+        "server_id": server.server_id,
+        "server_name": server.server_name,
+        "server_description": server.server_description,
+        "server_image": server.server_image,
+        "server_banner": server.server_banner,
+        "members": server.members or [],
+        "member_roles": server.member_roles or {},
+        "folders": server.folders or 0,
+        "channels": server.channels or 0,
+        "invite_code": server.invite_code,
+        "is_public": server.is_public,
+        "owner_id": server.owner_id,
+        "my_role": get_member_role(server, user_id),
+    }
+
 @app.get("/servers/me", response_model=list[models.ServerResponse])
 def get_my_servers(current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     servers = db.query(db_models.DBServer).all()
-    return [s for s in servers if current_user.user_id in s.members]
+    return [server_to_response(s, current_user.user_id) for s in servers if current_user.user_id in (s.members or [])]
 
 @app.post("/servers", response_model=models.ServerResponse, status_code=201)
 def create_server(server_data: models.ServerCreate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -827,6 +958,7 @@ def create_server(server_data: models.ServerCreate, current_user: db_models.DBUs
         server_image=server_data.server_image or "",
         server_banner=getattr(server_data, "server_banner", "") or "",
         members=[current_user.user_id],
+        member_roles={str(current_user.user_id): "admin"},
         folders=0,
         channels=0,
         invite_code=invite,
@@ -841,12 +973,17 @@ def create_server(server_data: models.ServerCreate, current_user: db_models.DBUs
         server_id=db_server.server_id,
         channel_name="general",
         channel_type="TEXT",
-        members=[current_user.user_id]
+        members=[current_user.user_id],
+        category_id=None,
+        position=0,
+        view_roles=list(ALL_ROLES),
+        send_roles=list(ALL_ROLES),
     )
     db.add(db_channel)
+    db_server.channels = 1
     db.commit()
     
-    return db_server
+    return server_to_response(db_server, current_user.user_id)
 
 @app.put("/servers/{server_id}", response_model=models.ServerResponse)
 def update_server(server_id: int, update_data: models.ServerUpdate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -943,7 +1080,7 @@ def leave_server(server_id: int, current_user: db_models.DBUser = Depends(get_cu
     db.commit()
     return {"status": "success", "detail": "Left server"}
 
-@app.get("/servers/{server_id}/members", response_model=list[models.UserResponse])
+@app.get("/servers/{server_id}/members", response_model=list[models.ServerMemberResponse])
 def get_server_members(server_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
     if not server:
@@ -952,7 +1089,74 @@ def get_server_members(server_id: int, current_user: db_models.DBUser = Depends(
         raise HTTPException(status_code=403, detail="Access Denied")
     
     users = db.query(db_models.DBUser).filter(db_models.DBUser.user_id.in_(server.members)).all()
-    return users
+    result = []
+    for u in users:
+        data = models.UserResponse.from_orm(u).dict()
+        data["server_role"] = get_member_role(server, u.user_id)
+        result.append(data)
+    return result
+
+@app.put("/servers/{server_id}/members/{user_id}/role", response_model=models.ServerMemberResponse)
+def set_server_member_role(server_id: int, user_id: int, body: models.MemberRoleUpdate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    if server.owner_id != current_user.user_id and get_member_role(server, current_user.user_id) != "admin":
+        raise HTTPException(status_code=403, detail="Only admins can change roles")
+    if user_id not in (server.members or []):
+        raise HTTPException(status_code=404, detail="User is not a member")
+    if user_id == server.owner_id:
+        raise HTTPException(status_code=400, detail="Cannot change the owner's role")
+    role = (body.role or "default").lower()
+    if role not in ALL_ROLES:
+        raise HTTPException(status_code=400, detail="Role must be default, mod, or admin")
+    set_member_role(server, user_id, role)
+    channels = db.query(db_models.DBChannel).filter(db_models.DBChannel.server_id == server_id).all()
+    for ch in channels:
+        sync_channel_members_from_roles(ch, server)
+    db.commit()
+    user = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == user_id).first()
+    data = models.UserResponse.from_orm(user).dict()
+    data["server_role"] = role
+    return data
+
+@app.post("/servers/{server_id}/members/{user_id}/kick")
+def kick_server_member(server_id: int, user_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    if server.invite_code == "GLOBAL":
+        raise HTTPException(status_code=400, detail="Cannot kick from the General server")
+    if not can_kick_members(server, current_user.user_id):
+        raise HTTPException(status_code=403, detail="Mods and admins can remove members")
+    if user_id not in (server.members or []):
+        raise HTTPException(status_code=404, detail="User is not a member")
+    if user_id == server.owner_id:
+        raise HTTPException(status_code=400, detail="Cannot kick the server owner")
+    if user_id == current_user.user_id:
+        raise HTTPException(status_code=400, detail="Use leave server instead")
+    actor_rank = {"default": 0, "mod": 1, "admin": 2}[get_member_role(server, current_user.user_id)]
+    target_rank = {"default": 0, "mod": 1, "admin": 2}[get_member_role(server, user_id)]
+    if server.owner_id != current_user.user_id and target_rank >= actor_rank:
+        raise HTTPException(status_code=403, detail="Cannot kick someone with equal or higher role")
+    members = list(server.members)
+    members.remove(user_id)
+    server.members = members
+    roles = dict(server.member_roles or {})
+    roles.pop(str(user_id), None)
+    server.member_roles = roles
+    from sqlalchemy.orm.attributes import flag_modified
+    flag_modified(server, "members")
+    flag_modified(server, "member_roles")
+    channels = db.query(db_models.DBChannel).filter(db_models.DBChannel.server_id == server_id).all()
+    for ch in channels:
+        if user_id in (ch.members or []):
+            cm = list(ch.members)
+            cm.remove(user_id)
+            ch.members = cm
+            flag_modified(ch, "members")
+    db.commit()
+    return {"status": "success", "detail": "Member removed"}
 
 @app.get("/servers/{server_id}/presence", response_model=list[int])
 def get_server_presence(server_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -995,16 +1199,76 @@ def join_by_invite(invite_code: str, current_user: db_models.DBUser = Depends(ge
         updated_server_members = list(server.members)
         updated_server_members.append(current_user.user_id)
         server.members = updated_server_members
+        set_member_role(server, current_user.user_id, "default")
         
         channels = db.query(db_models.DBChannel).filter(db_models.DBChannel.server_id == server.server_id).all()
         for channel in channels:
-            updated_channel_members = list(channel.members)
-            if current_user.user_id not in updated_channel_members:
-                updated_channel_members.append(current_user.user_id)
-                channel.members = updated_channel_members
+            if can_view_channel(channel, server, current_user.user_id):
+                updated_channel_members = list(channel.members or [])
+                if current_user.user_id not in updated_channel_members:
+                    updated_channel_members.append(current_user.user_id)
+                    channel.members = updated_channel_members
         
         db.commit()
     return {"status": "success", "detail": f"Joined server"}
+
+@app.get("/servers/{server_id}/categories", response_model=list[models.CategoryResponse])
+def get_server_categories(server_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    if current_user.user_id not in (server.members or []):
+        raise HTTPException(status_code=403, detail="Access Denied")
+    cats = db.query(db_models.DBChannelCategory).filter(db_models.DBChannelCategory.server_id == server_id).order_by(db_models.DBChannelCategory.position.asc(), db_models.DBChannelCategory.category_id.asc()).all()
+    return cats
+
+@app.post("/servers/{server_id}/categories", response_model=models.CategoryResponse, status_code=201)
+def create_category(server_id: int, body: models.CategoryCreate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    if not can_manage_channels(server, current_user.user_id):
+        raise HTTPException(status_code=403, detail="Only admins can create categories")
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name required")
+    max_pos = db.query(func.max(db_models.DBChannelCategory.position)).filter(db_models.DBChannelCategory.server_id == server_id).scalar()
+    cat = db_models.DBChannelCategory(server_id=server_id, name=name, position=(max_pos or 0) + 1)
+    db.add(cat)
+    db.commit()
+    db.refresh(cat)
+    return cat
+
+@app.patch("/categories/{category_id}", response_model=models.CategoryResponse)
+def update_category(category_id: int, body: models.CategoryUpdate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    cat = db.query(db_models.DBChannelCategory).filter(db_models.DBChannelCategory.category_id == category_id).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
+    server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == cat.server_id).first()
+    if not server or not can_manage_channels(server, current_user.user_id):
+        raise HTTPException(status_code=403, detail="Only admins can edit categories")
+    if body.name is not None:
+        cat.name = body.name.strip() or cat.name
+    if body.position is not None:
+        cat.position = body.position
+    db.commit()
+    db.refresh(cat)
+    return cat
+
+@app.delete("/categories/{category_id}")
+def delete_category(category_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    cat = db.query(db_models.DBChannelCategory).filter(db_models.DBChannelCategory.category_id == category_id).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Category not found")
+    server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == cat.server_id).first()
+    if not server or not can_manage_channels(server, current_user.user_id):
+        raise HTTPException(status_code=403, detail="Only admins can delete categories")
+    channels = db.query(db_models.DBChannel).filter(db_models.DBChannel.category_id == category_id).all()
+    for ch in channels:
+        ch.category_id = None
+    db.delete(cat)
+    db.commit()
+    return {"status": "success"}
 
 @app.get("/servers/{server_id}/channels", response_model=list[models.ChannelResponse])
 def get_server_channels(server_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -1013,30 +1277,107 @@ def get_server_channels(server_id: int, current_user: db_models.DBUser = Depends
         raise HTTPException(status_code=404, detail="Server not found")
     if current_user.user_id not in server.members:
         raise HTTPException(status_code=403, detail="Access Denied")
-    channels = db.query(db_models.DBChannel).filter(db_models.DBChannel.server_id == server_id).all()
-    return channels
+    channels = db.query(db_models.DBChannel).filter(db_models.DBChannel.server_id == server_id).order_by(db_models.DBChannel.position.asc(), db_models.DBChannel.channel_id.asc()).all()
+    return [channel_to_response(c, server, current_user.user_id) for c in channels if can_view_channel(c, server, current_user.user_id)]
 
 @app.post("/channels", response_model=models.ChannelResponse, status_code=201)
 def create_channel(channel_data: models.ChannelCreate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == channel_data.server_id).first()
-    if not server or current_user.user_id != server.owner_id:
-        raise HTTPException(status_code=403, detail="Access Denied. Only server owner can create channels.")
+    if not server or not can_manage_channels(server, current_user.user_id):
+        raise HTTPException(status_code=403, detail="Only admins can create channels")
 
+    view_roles = channel_data.view_roles if channel_data.view_roles is not None else list(ALL_ROLES)
+    send_roles = channel_data.send_roles if channel_data.send_roles is not None else list(ALL_ROLES)
+    view_roles = [r for r in view_roles if r in ALL_ROLES] or list(ALL_ROLES)
+    send_roles = [r for r in send_roles if r in ALL_ROLES] or list(ALL_ROLES)
+
+    if channel_data.category_id is not None:
+        cat = db.query(db_models.DBChannelCategory).filter(
+            db_models.DBChannelCategory.category_id == channel_data.category_id,
+            db_models.DBChannelCategory.server_id == server.server_id
+        ).first()
+        if not cat:
+            raise HTTPException(status_code=400, detail="Invalid category")
+
+    max_pos = db.query(func.max(db_models.DBChannel.position)).filter(db_models.DBChannel.server_id == server.server_id).scalar()
     db_channel = db_models.DBChannel(
         server_id=channel_data.server_id,
-        channel_name=channel_data.channel_name,
-        channel_type=channel_data.channel_type,
-        members=server.members
+        channel_name=channel_data.channel_name.strip(),
+        channel_type=channel_data.channel_type or "TEXT",
+        members=[],
+        category_id=channel_data.category_id,
+        position=(max_pos or 0) + 1,
+        view_roles=view_roles,
+        send_roles=send_roles,
     )
     db.add(db_channel)
+    db.flush()
+    sync_channel_members_from_roles(db_channel, server)
+    server.channels = (server.channels or 0) + 1
     db.commit()
     db.refresh(db_channel)
-    return db_channel
+    return channel_to_response(db_channel, server, current_user.user_id)
+
+@app.patch("/channels/{channel_id}", response_model=models.ChannelResponse)
+def update_channel(channel_id: int, body: models.ChannelUpdate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    channel = db.query(db_models.DBChannel).filter(db_models.DBChannel.channel_id == channel_id).first()
+    if not channel or channel.server_id is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == channel.server_id).first()
+    if not server or not can_manage_channels(server, current_user.user_id):
+        raise HTTPException(status_code=403, detail="Only admins can edit channels")
+    if body.channel_name is not None:
+        channel.channel_name = body.channel_name.strip() or channel.channel_name
+    if body.category_id is not None:
+        if body.category_id == 0:
+            channel.category_id = None
+        else:
+            cat = db.query(db_models.DBChannelCategory).filter(
+                db_models.DBChannelCategory.category_id == body.category_id,
+                db_models.DBChannelCategory.server_id == server.server_id
+            ).first()
+            if not cat:
+                raise HTTPException(status_code=400, detail="Invalid category")
+            channel.category_id = body.category_id
+    if body.position is not None:
+        channel.position = body.position
+    if body.view_roles is not None:
+        channel.view_roles = [r for r in body.view_roles if r in ALL_ROLES] or list(ALL_ROLES)
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(channel, "view_roles")
+    if body.send_roles is not None:
+        channel.send_roles = [r for r in body.send_roles if r in ALL_ROLES] or list(ALL_ROLES)
+        from sqlalchemy.orm.attributes import flag_modified
+        flag_modified(channel, "send_roles")
+    sync_channel_members_from_roles(channel, server)
+    db.commit()
+    db.refresh(channel)
+    return channel_to_response(channel, server, current_user.user_id)
+
+@app.delete("/channels/{channel_id}")
+def delete_channel(channel_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    channel = db.query(db_models.DBChannel).filter(db_models.DBChannel.channel_id == channel_id).first()
+    if not channel or channel.server_id is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == channel.server_id).first()
+    if not server or not can_manage_channels(server, current_user.user_id):
+        raise HTTPException(status_code=403, detail="Only admins can delete channels")
+    count = db.query(db_models.DBChannel).filter(db_models.DBChannel.server_id == server.server_id).count()
+    if count <= 1:
+        raise HTTPException(status_code=400, detail="Cannot delete the last channel")
+    db.query(db_models.DBMessage).filter(db_models.DBMessage.channel_id == channel_id).delete(synchronize_session=False)
+    db.delete(channel)
+    server.channels = max(0, (server.channels or 1) - 1)
+    db.commit()
+    return {"status": "success"}
 
 @app.get("/channels/{channel_id}/messages", response_model=list[models.Message])
 def get_channel_history(channel_id: int, limit: int = 50, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     channel = db.query(db_models.DBChannel).filter(db_models.DBChannel.channel_id == channel_id).first()
-    if not channel or current_user.user_id not in channel.members:
+    server = None
+    if channel and channel.server_id is not None:
+        server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == channel.server_id).first()
+    if not channel or not can_view_channel(channel, server, current_user.user_id):
         raise HTTPException(status_code=403, detail="Access Denied")
         
     messages = db.query(db_models.DBMessage).filter(db_models.DBMessage.channel_id == channel_id).order_by(db_models.DBMessage.created_at.desc()).limit(limit).all()

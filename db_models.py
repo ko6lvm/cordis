@@ -25,11 +25,20 @@ class DBServer(Base):
     server_image = Column(String)
     server_banner = Column(String)
     members = Column(JSON)
+    member_roles = Column(JSON)
     folders = Column(Integer)
     channels = Column(Integer)
     invite_code = Column(String, unique=True, index=True)
     is_public = Column(Boolean, default=False)
     owner_id = Column(Integer, index=True)
+
+class DBChannelCategory(Base):
+    __tablename__ = "channel_categories"
+
+    category_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    server_id = Column(Integer, index=True)
+    name = Column(String)
+    position = Column(Integer, default=0)
 
 class DBChannel(Base):
     __tablename__ = "channels"
@@ -39,6 +48,10 @@ class DBChannel(Base):
     channel_name = Column(String)
     channel_type = Column(String)
     members = Column(JSON)
+    category_id = Column(Integer, nullable=True, index=True)
+    position = Column(Integer, default=0)
+    view_roles = Column(JSON)
+    send_roles = Column(JSON)
 
 class DBMessage(Base):
     __tablename__ = "messages"
