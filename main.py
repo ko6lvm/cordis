@@ -7,7 +7,7 @@ from typing import Optional
 from dotenv import load_dotenv
 load_dotenv()
 
-from fastapi import FastAPI, WebSocket, Depends, WebSocketDisconnect, HTTPException, status, Query, UploadFile, File, Form, BackgroundTasks
+from fastapi import FastAPI, WebSocket, Depends, WebSocketDisconnect, HTTPException, status, Query, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi.staticfiles import StaticFiles
@@ -385,95 +385,144 @@ class ConnectionManager:
                     except:
                         pass
 
-    async def broadcast_to_server(self, server_id: int, message_data: dict, db: Session):
-        server_channels = db.query(db_models.DBChannel).filter(db_models.DBChannel.server_id == server_id).all()
-        for ch in server_channels:
-            if ch.channel_id in self.active_connections:
-                for connection in self.active_connections[ch.channel_id]:
-                    try:
-                        await connection.send_json(message_data)
-                    except:
-                        pass
-
 manager = ConnectionManager()
 
-async def broadcast_member_update(server_id: int):
-    db = next(get_db())
-    try:
-        await manager.broadcast_to_server(server_id, {"type": "member_update", "server_id": server_id}, db)
-    finally:
-        db.close()
+def extract_youtube_video_id(url: str) -> Optional[str]:
+    if not url:
+        return None
+    cleaned = url.strip().rstrip(").,;]!>'\"")
+    patterns = [
+        r'(?:youtube\.com/watch\?(?:[^#\s]*&)?v=|youtube\.com/embed/|youtube\.com/v/|youtube\.com/shorts/|youtu\.be/)([A-Za-z0-9_-]{11})',
+        r'youtube\.com/live/([A-Za-z0-9_-]{11})',
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, cleaned, re.IGNORECASE)
+        if match:
+            return match.group(1)
+    return None
 
-async def broadcast_user_update(user_id: int):
-    db = next(get_db())
+
+async def fetch_youtube_embed(client: httpx.AsyncClient, url: str, video_id: str) -> dict:
+    watch_url = f"https://www.youtube.com/watch?v={video_id}"
+    title = "YouTube"
+    description = ""
+    image = f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg"
+    author = ""
+
     try:
-        servers = db.query(db_models.DBServer).all()
-        for srv in servers:
-            if srv.members and user_id in srv.members:
-                await manager.broadcast_to_server(srv.server_id, {"type": "member_update", "server_id": srv.server_id}, db)
-    finally:
-        db.close()
+        oembed_url = f"https://www.youtube.com/oembed?url={watch_url}&format=json"
+        resp = await client.get(oembed_url, timeout=5.0)
+        if resp.status_code == 200:
+            data = resp.json()
+            title = data.get("title") or title
+            author = data.get("author_name") or ""
+            if data.get("thumbnail_url"):
+                image = data["thumbnail_url"]
+            if author:
+                description = f"YouTube · {author}"
+            else:
+                description = "YouTube"
+    except Exception:
+        description = "YouTube"
+
+    for quality in ("maxresdefault", "sddefault", "hqdefault"):
+        candidate = f"https://i.ytimg.com/vi/{video_id}/{quality}.jpg"
+        try:
+            head = await client.head(candidate, timeout=3.0, follow_redirects=True)
+            if head.status_code == 200 and int(head.headers.get("content-length", "1")) > 2000:
+                image = candidate
+                break
+        except Exception:
+            continue
+
+    return {
+        "title": title,
+        "description": description,
+        "url": watch_url,
+        "image": image,
+        "type": "youtube",
+        "video_id": video_id,
+        "provider": "YouTube",
+    }
+
 
 async def fetch_link_metadata_task(channel_id: int, message_id: int, url: str):
     db = next(get_db())
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(url, follow_redirects=True)
-            response.raise_for_status()
-            
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            title_tag = soup.find("meta", property="og:title")
-            title = title_tag["content"] if title_tag else (soup.title.string if soup.title else url)
-            
-            desc_tag = soup.find("meta", property="og:description")
-            description = desc_tag["content"] if desc_tag else ""
-            
-            img_tag = soup.find("meta", property="og:image")
-            image = img_tag["content"] if img_tag else ""
-            
-            embed = {
-                "title": title,
-                "description": description,
-                "url": url,
-                "image": image
-            }
-            
+        url = (url or "").strip().rstrip(").,;]!>'\"")
+        async with httpx.AsyncClient(timeout=8.0, headers={
+            "User-Agent": "Mozilla/5.0 (compatible; CordisBot/1.0; +https://cordis.local)"
+        }) as client:
+            video_id = extract_youtube_video_id(url)
+            if video_id:
+                embed = await fetch_youtube_embed(client, url, video_id)
+            else:
+                response = await client.get(url, follow_redirects=True)
+                response.raise_for_status()
+
+                soup = BeautifulSoup(response.text, 'html.parser')
+
+                title_tag = soup.find("meta", property="og:title")
+                title = title_tag["content"] if title_tag else (soup.title.string if soup.title else url)
+
+                desc_tag = soup.find("meta", property="og:description")
+                description = desc_tag["content"] if desc_tag else ""
+
+                img_tag = soup.find("meta", property="og:image")
+                image = img_tag["content"] if img_tag else ""
+
+                embed = {
+                    "title": title,
+                    "description": description,
+                    "url": url,
+                    "image": image,
+                    "type": "link",
+                    "video_id": None,
+                    "provider": None,
+                }
+
             db_msg = db.query(db_models.DBMessage).filter(db_models.DBMessage.message_id == message_id).first()
             if db_msg:
                 content = dict(db_msg.content)
                 embeds = list(content.get("embeds", []))
-                embeds.append(embed)
-                content["embeds"] = embeds
-                db_msg.content = content
-                
-                from sqlalchemy.orm.attributes import flag_modified
-                flag_modified(db_msg, "content")
-                db.commit()
-                
-                channel = db.query(db_models.DBChannel).filter(db_models.DBChannel.channel_id == channel_id).first()
-                author_user = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == db_msg.author_id).first()
-                
-                broadcast_msg = {
-                    "type": "message_update",
-                    "message_id": db_msg.message_id,
-                    "channel_id": db_msg.channel_id,
-                    "server_id": channel.server_id if channel else None,
-                    "author_id": db_msg.author_id,
-                    "author": models.UserResponse.from_orm(author_user).dict() if author_user else None,
-                    "content": db_msg.content,
-                    "created_at": db_msg.created_at,
-                    "modified_at": db_msg.modified_at,
-                    "message_type": db_msg.message_type,
-                    "parent_id": db_msg.parent_id,
-                    "thread_id": db_msg.thread_id,
-                    "mentions": db_msg.mentions,
-                    "flags": db_msg.flags,
-                    "reactions": db_msg.reactions
-                }
-                
-                await manager.broadcast(channel_id, broadcast_msg)
-                
+                already = any(
+                    (e.get("video_id") and e.get("video_id") == embed.get("video_id"))
+                    or (e.get("url") and e.get("url") == embed.get("url"))
+                    for e in embeds
+                    if isinstance(e, dict)
+                )
+                if not already:
+                    embeds.append(embed)
+                    content["embeds"] = embeds
+                    db_msg.content = content
+
+                    from sqlalchemy.orm.attributes import flag_modified
+                    flag_modified(db_msg, "content")
+                    db.commit()
+
+                    channel = db.query(db_models.DBChannel).filter(db_models.DBChannel.channel_id == channel_id).first()
+                    author_user = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == db_msg.author_id).first()
+
+                    broadcast_msg = {
+                        "type": "message_update",
+                        "message_id": db_msg.message_id,
+                        "channel_id": db_msg.channel_id,
+                        "server_id": channel.server_id if channel else None,
+                        "author_id": db_msg.author_id,
+                        "author": models.UserResponse.from_orm(author_user).dict() if author_user else None,
+                        "content": db_msg.content,
+                        "created_at": db_msg.created_at,
+                        "modified_at": db_msg.modified_at,
+                        "message_type": db_msg.message_type,
+                        "parent_id": db_msg.parent_id,
+                        "thread_id": db_msg.thread_id,
+                        "mentions": db_msg.mentions,
+                        "flags": db_msg.flags,
+                        "reactions": db_msg.reactions
+                    }
+
+                    await manager.broadcast(channel_id, broadcast_msg)
+
     except Exception as e:
         print(f"Error fetching metadata for {url}: {e}")
     finally:
@@ -842,7 +891,7 @@ def get_me(current_user: db_models.DBUser = Depends(get_current_user)):
     return current_user
 
 @app.put("/users/me", response_model=models.UserResponse)
-def update_me(update_data: models.UserUpdate, background_tasks: BackgroundTasks, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def update_me(update_data: models.UserUpdate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     if update_data.username != current_user.username:
         existing = db.query(db_models.DBUser).filter(func.lower(db_models.DBUser.username) == update_data.username.lower()).first()
         if existing:
@@ -871,7 +920,6 @@ def update_me(update_data: models.UserUpdate, background_tasks: BackgroundTasks,
         
     db.commit()
     db.refresh(current_user)
-    background_tasks.add_task(broadcast_user_update, current_user.user_id)
     return current_user
 
 @app.get("/users/me/unreads", response_model=dict[int, models.UnreadState])
@@ -1085,7 +1133,7 @@ def delete_server(server_id: int, current_user: db_models.DBUser = Depends(get_c
     return {"status": "success", "detail": "Server deleted" if server.owner_id == current_user.user_id else "Server removed"}
 
 @app.post("/servers/{server_id}/leave")
-def leave_server(server_id: int, background_tasks: BackgroundTasks, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def leave_server(server_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -1111,7 +1159,6 @@ def leave_server(server_id: int, background_tasks: BackgroundTasks, current_user
             channel.members = updated_channel_members
             
     db.commit()
-    background_tasks.add_task(broadcast_member_update, server_id)
     return {"status": "success", "detail": "Left server"}
 
 @app.get("/servers/{server_id}/members", response_model=list[models.ServerMemberResponse])
@@ -1131,7 +1178,7 @@ def get_server_members(server_id: int, current_user: db_models.DBUser = Depends(
     return result
 
 @app.put("/servers/{server_id}/members/{user_id}/role", response_model=models.ServerMemberResponse)
-def set_server_member_role(server_id: int, user_id: int, body: models.MemberRoleUpdate, background_tasks: BackgroundTasks, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def set_server_member_role(server_id: int, user_id: int, body: models.MemberRoleUpdate, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -1152,11 +1199,10 @@ def set_server_member_role(server_id: int, user_id: int, body: models.MemberRole
     user = db.query(db_models.DBUser).filter(db_models.DBUser.user_id == user_id).first()
     data = models.UserResponse.from_orm(user).dict()
     data["server_role"] = role
-    background_tasks.add_task(broadcast_member_update, server_id)
     return data
 
 @app.post("/servers/{server_id}/members/{user_id}/kick")
-def kick_server_member(server_id: int, user_id: int, background_tasks: BackgroundTasks, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def kick_server_member(server_id: int, user_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
@@ -1191,7 +1237,6 @@ def kick_server_member(server_id: int, user_id: int, background_tasks: Backgroun
             ch.members = cm
             flag_modified(ch, "members")
     db.commit()
-    background_tasks.add_task(broadcast_member_update, server_id)
     return {"status": "success", "detail": "Member removed"}
 
 @app.get("/servers/{server_id}/presence", response_model=list[int])
@@ -1226,7 +1271,7 @@ def get_invite_preview(invite_code: str, db: Session = Depends(get_db)):
     }
 
 @app.post("/servers/join-by-invite/{invite_code}")
-def join_by_invite(invite_code: str, background_tasks: BackgroundTasks, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+def join_by_invite(invite_code: str, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
     server = db.query(db_models.DBServer).filter(db_models.DBServer.invite_code == invite_code).first()
     if not server:
         raise HTTPException(status_code=404, detail="Invalid invite code")
@@ -1246,7 +1291,6 @@ def join_by_invite(invite_code: str, background_tasks: BackgroundTasks, current_
                     channel.members = updated_channel_members
         
         db.commit()
-    background_tasks.add_task(broadcast_member_update, server.server_id)
     return {"status": "success", "detail": f"Joined server"}
 
 @app.get("/servers/{server_id}/categories", response_model=list[models.CategoryResponse])
