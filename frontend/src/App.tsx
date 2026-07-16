@@ -2315,7 +2315,7 @@ function App() {
               gap: '8px'
             }}>
               <AlertTriangle size={20} />
-              Cordis Beta v0.0.0
+              Cordis v1.0
             </div>
             <div style={{
               color: '#dbdee1',
