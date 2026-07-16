@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Compass, Plus, Hash, LogOut, Send, Loader2, Settings, Users, Home, MessageSquare, Check, X, AlertTriangle, Pencil, Trash2, Reply, File as FileIcon, UploadCloud, Download, Hammer, Play, Pause, Smile, Pin, Sun, Moon, ChevronDown, ChevronRight, FolderPlus, Shield, Menu } from 'lucide-react';
@@ -2315,7 +2315,7 @@ function App() {
               gap: '8px'
             }}>
               <AlertTriangle size={20} />
-              Cordis v1.0
+              Cordis v1.0.1
             </div>
             <div style={{
               color: '#dbdee1',
@@ -2832,7 +2832,7 @@ function App() {
               )}
             </div>
           )}
-          {messages.map((m, i) => {
+          {useMemo(() => messages.map((m, i) => {
             const isMentioned = currentUserRef.current && m.mentions?.includes(currentUserRef.current.user_id);
             const isDeleted = m.flags?.includes("DELETED");
             const isEdited = m.flags?.includes("EDITED");
@@ -3057,7 +3057,7 @@ function App() {
               )}
               </div>
             </div>
-          )})}
+          )}), [messages, activeServer?.server_id, activeMessageId, isMobile, revealedMessages, editingMessageId, editContent, isMuted, serverMembers, dms, showEmojiPicker, showFullEmojiPicker, theme])}
           <div ref={messagesEndRef} />
         </div>
 

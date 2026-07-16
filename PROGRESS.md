@@ -358,6 +358,10 @@ Builds frontend assets and handles backend uvicorn service execution:
 
 ## 9. Recent Implementations & Changelog
 
+### Version 1.0.1 Updates
+*   **Performance Optimization:** Memoized the main chat interface's message rendering list. This resolves a critical issue in production where typing in the chat input would cause the UI to freeze due to triggering full re-renders of all rich Markdown messages on every keystroke.
+*   **App-wide Versioning:** Synchronized version numbers to `v1.0.1` across `package.json` files, the React application UI, and HTML tags.
+
 ### Core Features & UI
 *   **Discord-Style Emoji Reactions:** Users can react to messages using a curated mini-picker on hover or a full `emoji-picker-react` interface. Reactions sync in real-time via WebSockets and include Discord-style tooltips showing which users reacted.
 *   **Discord-Style Message Hover UI:** Messages feature a full-width subtle tint on hover. The floating message action bar (Reply/Edit/Delete/React) stays pinned if an interaction menu is open and has a clean, uniform design.
