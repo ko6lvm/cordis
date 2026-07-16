@@ -2323,7 +2323,7 @@ function App() {
               lineHeight: '1.4',
               fontWeight: 500
             }}>
-              WARNING: THIS IS A PUBLIC BETA. DATABASE IS TO SUBJECT TO RESET. DO NOT SAVE IMPORTANT DATA.
+              Cordis is a new app with the possiblity for a lot of bugs. Please report them accordingly in Github or the KillSecurly Discord.
             </div>
           </div>
 
