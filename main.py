@@ -352,7 +352,10 @@ class ConnectionManager:
     async def broadcast(self, channel_id: int, message_data: dict):
         if channel_id in self.active_connections:
             for connection in self.active_connections[channel_id]:
-                await connection.send_json(message_data)
+                try:
+                    await connection.send_json(message_data)
+                except:
+                    pass
                 
     async def send_personal_notification(self, user_id: int, event_data: dict):
         if user_id in self.user_sockets:
