@@ -962,9 +962,11 @@ h1, h2, h3, h4, h5, h6 {
 }
 .modal-content {
   width: 480px;
+  max-height: 90vh;
   background-color: var(--bg-card);
   border-radius: var(--radius-md);
   box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+  overflow-y: auto;
 }
 .modal-header {
   padding: var(--space-5);
@@ -992,6 +994,53 @@ h1, h2, h3, h4, h5, h6 {
   display: flex;
   justify-content: flex-end;
   gap: var(--space-3);
+}
+
+/* Image Crop Modal */
+.crop-viewport {
+  position: relative;
+  width: 100%;
+  height: 320px;
+  background-color: var(--bg-dark);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+.crop-zoom-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+.crop-zoom-label {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  user-select: none;
+  flex-shrink: 0;
+}
+.crop-zoom-slider {
+  flex: 1;
+  -webkit-appearance: none;
+  appearance: none;
+  height: 4px;
+  border-radius: var(--radius-full);
+  background: var(--bg-modifier-active);
+  outline: none;
+}
+.crop-zoom-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--brand-primary);
+  cursor: pointer;
+}
+.crop-zoom-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: none;
+  border-radius: 50%;
+  background: var(--brand-primary);
+  cursor: pointer;
 }
 
 /* Skeletons */

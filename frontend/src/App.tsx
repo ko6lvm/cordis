@@ -4,6 +4,7 @@ import remarkGfm from 'remark-gfm';
 import { Compass, Plus, Hash, LogOut, Send, Loader2, Settings, Users, Home, MessageSquare, Check, X, AlertTriangle, Pencil, Trash2, Reply, File as FileIcon, UploadCloud, Download, Hammer, Play, Pause, Smile, Pin, Sun, Moon, ChevronDown, ChevronRight, FolderPlus, Shield, Menu } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
 import EmojiPicker, { Theme } from 'emoji-picker-react';
+import ImageCropModal from './components/ImageCropModal';
 
 const API_BASE = import.meta.env.VITE_API_BASE || (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? "http://127.0.0.1:8000" : "");
 
@@ -84,6 +85,15 @@ const getFullUrl = (url: string | undefined | null) => {
   if (!url) return '';
   if (url.startsWith('/')) return `${API_BASE}${url}`;
   return url;
+};
+
+type CropTarget = 'userAvatar' | 'userBanner' | 'serverIcon' | 'serverBanner';
+
+const CROP_CONFIG: Record<CropTarget, { aspect: number; cropShape: 'round' | 'rect'; outputWidth: number; outputHeight: number; title: string }> = {
+  userAvatar: { aspect: 1, cropShape: 'round', outputWidth: 512, outputHeight: 512, title: 'Crop Profile Picture' },
+  userBanner: { aspect: 3, cropShape: 'rect', outputWidth: 1500, outputHeight: 500, title: 'Crop Profile Banner' },
+  serverIcon: { aspect: 1, cropShape: 'round', outputWidth: 512, outputHeight: 512, title: 'Crop Server Icon' },
+  serverBanner: { aspect: 3, cropShape: 'rect', outputWidth: 1500, outputHeight: 500, title: 'Crop Server Banner' },
 };
 
 const formatLastActive = (lastActiveAt: number | undefined, isOnline: boolean) => {
@@ -536,6 +546,8 @@ function App() {
   const [settingsBanner, setSettingsBanner] = useState('');
   const [settingsProfilePicFile, setSettingsProfilePicFile] = useState<File | null>(null);
   const [settingsBannerFile, setSettingsBannerFile] = useState<File | null>(null);
+
+  const [cropRequest, setCropRequest] = useState<{ target: CropTarget; imageSrc: string } | null>(null);
 
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [adminSearchUser, setAdminSearchUser] = useState('');
@@ -1673,6 +1685,8 @@ function App() {
 
   const openSettings = () => {
     if (user) {
+      if (settingsProfilePic.startsWith('blob:')) URL.revokeObjectURL(settingsProfilePic);
+      if (settingsBanner.startsWith('blob:')) URL.revokeObjectURL(settingsBanner);
       setSettingsUsername(user.username);
       setSettingsDisplayName(user.display_name || user.username);
       setSettingsDescription(user.description || '');
@@ -1683,8 +1697,16 @@ function App() {
     }
   };
 
+  const closeSettings = () => {
+    if (settingsProfilePic.startsWith('blob:')) URL.revokeObjectURL(settingsProfilePic);
+    if (settingsBanner.startsWith('blob:')) URL.revokeObjectURL(settingsBanner);
+    setShowSettings(false);
+  };
+
   const openServerSettings = () => {
     if (activeServer) {
+      if (serverImage.startsWith('blob:')) URL.revokeObjectURL(serverImage);
+      if (serverBanner.startsWith('blob:')) URL.revokeObjectURL(serverBanner);
       setServerName(activeServer.server_name);
       setServerDescription(activeServer.server_description || '');
       setServerImage(activeServer.server_image || '');
@@ -1694,12 +1716,51 @@ function App() {
     }
   };
 
-  const handleImageUpload = (e: React.ChangeEvent<HTMLInputElement>, setter: React.Dispatch<React.SetStateAction<string>>, fileSetter?: React.Dispatch<React.SetStateAction<File | null>>) => {
+  const closeServerSettings = () => {
+    if (serverImage.startsWith('blob:')) URL.revokeObjectURL(serverImage);
+    if (serverBanner.startsWith('blob:')) URL.revokeObjectURL(serverBanner);
+    setShowServerSettings(false);
+  };
+
+  const openCropModalForFile = (e: React.ChangeEvent<HTMLInputElement>, target: CropTarget) => {
     const file = e.target.files?.[0];
-    if (file) {
-      if (fileSetter) fileSetter(file);
-      setter(URL.createObjectURL(file));
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      alert('Please select an image file.');
+      return;
     }
+    setCropRequest({ target, imageSrc: URL.createObjectURL(file) });
+  };
+
+  const handleCropCancel = () => {
+    if (cropRequest) URL.revokeObjectURL(cropRequest.imageSrc);
+    setCropRequest(null);
+  };
+
+  const handleCropSave = (blob: Blob) => {
+    if (!cropRequest) return;
+    const file = new File([blob], `${cropRequest.target}-${Date.now()}.jpg`, { type: blob.type });
+    const previewUrl = URL.createObjectURL(blob);
+    if (cropRequest.target === 'userAvatar') {
+      if (settingsProfilePic.startsWith('blob:')) URL.revokeObjectURL(settingsProfilePic);
+      setSettingsProfilePicFile(file);
+      setSettingsProfilePic(previewUrl);
+    } else if (cropRequest.target === 'userBanner') {
+      if (settingsBanner.startsWith('blob:')) URL.revokeObjectURL(settingsBanner);
+      setSettingsBannerFile(file);
+      setSettingsBanner(previewUrl);
+    } else if (cropRequest.target === 'serverIcon') {
+      if (serverImage.startsWith('blob:')) URL.revokeObjectURL(serverImage);
+      setServerImageFile(file);
+      setServerImage(previewUrl);
+    } else {
+      if (serverBanner.startsWith('blob:')) URL.revokeObjectURL(serverBanner);
+      setServerBannerFile(file);
+      setServerBanner(previewUrl);
+    }
+    URL.revokeObjectURL(cropRequest.imageSrc);
+    setCropRequest(null);
   };
 
   const uploadFileToServer = async (file: File, uploadType: string): Promise<string> => {
@@ -2087,7 +2148,8 @@ function App() {
       showAdminPanel ||
       showServerSettings ||
       showCreateChannelModal ||
-      showInvitePreview;
+      showInvitePreview ||
+      cropRequest !== null;
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
@@ -2142,6 +2204,12 @@ function App() {
           setReplyingTo(null);
           return;
         }
+        if (cropRequest) {
+          e.preventDefault();
+          e.stopPropagation();
+          handleCropCancel();
+          return;
+        }
         if (showAdminPanel) {
           e.preventDefault();
           e.stopPropagation();
@@ -2151,7 +2219,7 @@ function App() {
         if (showSettings) {
           e.preventDefault();
           e.stopPropagation();
-          setShowSettings(false);
+          closeSettings();
           return;
         }
         if (showCreateServer) {
@@ -2169,7 +2237,7 @@ function App() {
         if (showServerSettings) {
           e.preventDefault();
           e.stopPropagation();
-          setShowServerSettings(false);
+          closeServerSettings();
           return;
         }
         if (showCreateChannelModal) {
@@ -2279,6 +2347,11 @@ function App() {
     chatInput,
     messages,
     user,
+    cropRequest,
+    settingsProfilePic,
+    settingsBanner,
+    serverImage,
+    serverBanner,
   ]);
 
   if (user && user.status === 'BANNED') {
@@ -3566,7 +3639,7 @@ function App() {
 
       {/* User Settings Modal */}
       {showSettings && (
-        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowSettings(false); }}>
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) closeSettings(); }}>
           <div className="modal-content">
             <div className="modal-header">
               <div className="modal-title">My Account</div>
@@ -3586,7 +3659,7 @@ function App() {
                   )}
                   <label style={{position: 'absolute', bottom: 0, right: 0, backgroundColor: 'var(--bg-card)', borderRadius: '50%', padding: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>
                     <Plus size={16} />
-                    <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setSettingsProfilePic, setSettingsProfilePicFile)} />
+                    <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => openCropModalForFile(e, 'userAvatar')} />
                   </label>
                 </div>
 
@@ -3596,7 +3669,7 @@ function App() {
                     {settingsBanner && <img src={getFullUrl(settingsBanner)} alt="Banner" style={{width: '100%', height: '100%', objectFit: 'cover'}} />}
                     <label style={{position: 'absolute', top: '8px', right: '8px', backgroundColor: 'var(--bg-card)', borderRadius: '50%', padding: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>
                       <Plus size={16} />
-                      <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setSettingsBanner, setSettingsBannerFile)} />
+                      <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => openCropModalForFile(e, 'userBanner')} />
                     </label>
                   </div>
                 </div>
@@ -3647,7 +3720,7 @@ function App() {
                 </div>
               </div>
               <div className="modal-footer">
-                <button type="button" className="btn btn-secondary" onClick={() => setShowSettings(false)} disabled={isSavingSettings}>Cancel</button>
+                <button type="button" className="btn btn-secondary" onClick={closeSettings} disabled={isSavingSettings}>Cancel</button>
                 <button type="submit" className="btn" style={{minWidth: '100px'}} disabled={isSavingSettings}>
                   {isSavingSettings ? <Loader2 size={18} className="spinner" /> : 'Save Changes'}
                 </button>
@@ -3758,7 +3831,7 @@ function App() {
 
       {/* Server Settings Modal */}
       {showServerSettings && (
-        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) setShowServerSettings(false); }}>
+        <div className="modal-overlay" onClick={(e) => { if (e.target === e.currentTarget) closeServerSettings(); }}>
           <div className="modal-content">
             <div className="modal-header">
               <div className="modal-title">Server</div>
@@ -3777,7 +3850,7 @@ function App() {
                   )}
                   <label style={{position: 'absolute', bottom: 0, right: 0, backgroundColor: 'var(--bg-card)', borderRadius: '50%', padding: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>
                     <Plus size={16} />
-                    <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setServerImage, setServerImageFile)} />
+                    <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => openCropModalForFile(e, 'serverIcon')} />
                   </label>
                 </div>
 
@@ -3787,7 +3860,7 @@ function App() {
                     {serverBanner && <img src={getFullUrl(serverBanner)} alt="Server Banner" style={{width: '100%', height: '100%', objectFit: 'cover'}} />}
                     <label style={{position: 'absolute', top: '8px', right: '8px', backgroundColor: 'var(--bg-card)', borderRadius: '50%', padding: '4px', cursor: 'pointer', boxShadow: '0 2px 4px rgba(0,0,0,0.5)'}}>
                       <Plus size={16} />
-                      <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => handleImageUpload(e, setServerBanner, setServerBannerFile)} />
+                      <input type="file" accept="image/*" style={{display: 'none'}} onChange={(e) => openCropModalForFile(e, 'serverBanner')} />
                     </label>
                   </div>
                 </div>
@@ -3814,7 +3887,7 @@ function App() {
                   {isDeletingServer ? <Loader2 size={18} className="spinner" /> : 'Delete Server'}
                 </button>
                 <div style={{display: 'flex', gap: '8px'}}>
-                  <button type="button" className="btn btn-secondary" onClick={() => setShowServerSettings(false)} disabled={isSavingServer || isDeletingServer}>Cancel</button>
+                  <button type="button" className="btn btn-secondary" onClick={closeServerSettings} disabled={isSavingServer || isDeletingServer}>Cancel</button>
                   <button type="submit" className="btn" style={{minWidth: '100px'}} disabled={isSavingServer || isDeletingServer}>
                     {isSavingServer ? <Loader2 size={18} className="spinner" /> : 'Save Changes'}
                   </button>
@@ -4010,6 +4083,16 @@ function App() {
             </form>
           </div>
         </div>
+      )}
+
+      {/* Image Crop Modal - rendered last so it always paints on top of any other open modal */}
+      {cropRequest && (
+        <ImageCropModal
+          imageSrc={cropRequest.imageSrc}
+          {...CROP_CONFIG[cropRequest.target]}
+          onCancel={handleCropCancel}
+          onSave={handleCropSave}
+        />
       )}
     </div>
   );
