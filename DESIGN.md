@@ -4,6 +4,8 @@
 - **Dynamic DM Sidebar Refresh**: Received messages for new DMs that are not currently in the sidebar trigger an async refresh to fetch and list the new conversation in real-time.
 - **Modal Keyboard Shortcuts**: Users can use the `Esc` key to exit most active modals and overlay windows.
 - **Admin Panel UI**: The Moderator (Admin) Panel is now rendered as a fullscreen overlay rather than a fixed-width popup. The search bar is constrained in width for better UX on ultrawide displays, and the user result card now mimics the styling and layout of a standard profile popover, including rendering the user's joined servers.
+- **Login Homepage UI**: Added "Cordis v1.0.1" title and "made by KillSecurly (logo), a project of LVMLabs (logo)" branding above the warning block for unauthenticated users. The warning block title has been changed from "Cordis v1.0.1" to "Warning".
+
 
 # Backend
 - **Admin Endpoints**: Added a `GET /admin/users/{user_id}/servers` endpoint to fetch the list of servers a user is a part of (requires SYSTEM_MOD or SYSTEM_ADMIN).

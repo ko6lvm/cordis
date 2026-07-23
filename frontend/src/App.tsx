@@ -2369,6 +2369,30 @@ function App() {
     return (
       <div className="auth-container">
         <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', width: '100%', maxWidth: '440px', padding: '16px' }}>
+          <div style={{ width: '100%', display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '4px', marginBottom: '8px' }}>
+            <h1 style={{ margin: 0, fontSize: '2rem', fontWeight: 800, color: 'var(--text-normal, #dbdee1)' }}>
+              Cordis v1.0.1
+            </h1>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: 'var(--text-muted, #949ba4)', fontSize: '0.95rem', flexWrap: 'wrap', justifyContent: 'center' }}>
+              <span>made by</span>
+              <a href="https://killsecurly.com" target="_blank" rel="noopener noreferrer" style={{ display: 'flex', alignItems: 'center' }}>
+                <img 
+                  src="https://raw.githubusercontent.com/killsecurly/assets/main/KSFLogoRed.png" 
+                  alt="KillSecurly" 
+                  style={{ height: '36px', filter: 'invert(1) hue-rotate(180deg)' }} 
+                />
+              </a>
+              <span>, a project of</span>
+              <a href="https://lvmlabs.org" target="_blank" rel="noopener noreferrer" style={{ display: 'flex', alignItems: 'center' }}>
+                <img 
+                  src="https://raw.githubusercontent.com/ko6lvm/LVMLabs.org/b6cf7afb3ea2011e533b103f83620672c448cac0/lvmlabs/static/images/logo-crop-white-italics.png" 
+                  alt="LVMLabs" 
+                  style={{ height: '18px' }} 
+                />
+              </a>
+            </div>
+          </div>
+
           <div className="card" style={{
             backgroundColor: 'rgba(242, 63, 67, 0.1)',
             border: '1px solid rgba(242, 63, 67, 0.3)',
@@ -2388,7 +2412,7 @@ function App() {
               gap: '8px'
             }}>
               <AlertTriangle size={20} />
-              Cordis v1.0.1
+              Warning
             </div>
             <div style={{
               color: '#dbdee1',
