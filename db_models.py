@@ -120,4 +120,15 @@ class DBScheduledMessage(Base):
     flags = Column(JSON)
     scheduled_at = Column(Integer, index=True)
     created_at = Column(Integer)
-    status = Column(String, default="pending")
+    status = Column(String, default="pending")
+
+
+class DBServerEmoji(Base):
+    __tablename__ = "server_emojis"
+
+    emoji_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    server_id = Column(Integer, index=True)
+    name = Column(String, index=True)
+    image_url = Column(String)
+    creator_id = Column(Integer, index=True)
+    created_at = Column(Integer)

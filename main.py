@@ -1447,6 +1447,16 @@ def delete_server(server_id: int, current_user: db_models.DBUser = Depends(get_c
         channel_ids = [c.channel_id for c in channels]
         db.query(db_models.DBMessage).filter(db_models.DBMessage.channel_id.in_(channel_ids)).delete(synchronize_session=False)
         db.query(db_models.DBChannel).filter(db_models.DBChannel.server_id == server_id).delete(synchronize_session=False)
+        db.query(db_models.DBChannelCategory).filter(db_models.DBChannelCategory.server_id == server_id).delete(synchronize_session=False)
+        server_emojis = db.query(db_models.DBServerEmoji).filter(db_models.DBServerEmoji.server_id == server_id).all()
+        for em in server_emojis:
+            try:
+                storage.delete_file(em.image_url)
+            except Exception:
+                pass
+        db.query(db_models.DBServerEmoji).filter(db_models.DBServerEmoji.server_id == server_id).delete(synchronize_session=False)
+        db.query(db_models.DBServerInvite).filter(db_models.DBServerInvite.server_id == server_id).delete(synchronize_session=False)
+        db.query(db_models.DBTemporaryMember).filter(db_models.DBTemporaryMember.server_id == server_id).delete(synchronize_session=False)
         db.delete(server)
     else:
         # Non-owner "deletes" (leaves) the server: remove membership
@@ -1548,6 +1558,129 @@ def update_server_roles(server_id: int, body: models.RoleUpdate, current_user: d
     flag_modified(server, "roles")
     db.commit()
     return {"status": "success", "roles": server.roles}
+
+
+MAX_SERVER_EMOJIS = 50
+EMOJI_NAME_RE = re.compile(r"^[a-zA-Z0-9_]{2,32}$")
+
+
+def normalize_emoji_name(name: str) -> str:
+    return (name or "").strip().lower()
+
+
+def ensure_server_member(server: db_models.DBServer, user_id: int):
+    if user_id not in (server.members or []):
+        raise HTTPException(status_code=403, detail="You are not a member of this server")
+
+
+def can_manage_server_emojis(server: db_models.DBServer, user_id: int) -> bool:
+    return server.owner_id == user_id or has_permission(server, user_id, "ADMIN")
+
+
+@app.get("/servers/{server_id}/emojis", response_model=list[models.ServerEmojiResponse])
+def list_server_emojis(server_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
+    server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    ensure_server_member(server, current_user.user_id)
+    return (
+        db.query(db_models.DBServerEmoji)
+        .filter(db_models.DBServerEmoji.server_id == server_id)
+        .order_by(db_models.DBServerEmoji.name.asc())
+        .all()
+    )
+
+
+@app.post("/servers/{server_id}/emojis", response_model=models.ServerEmojiResponse, status_code=201)
+def create_server_emoji(
+    server_id: int,
+    body: models.ServerEmojiCreate,
+    current_user: db_models.DBUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    ensure_server_member(server, current_user.user_id)
+    if not can_manage_server_emojis(server, current_user.user_id):
+        raise HTTPException(status_code=403, detail="Only admins can manage server emojis")
+
+    name = normalize_emoji_name(body.name)
+    if not EMOJI_NAME_RE.match(name):
+        raise HTTPException(
+            status_code=400,
+            detail="Emoji name must be 2-32 characters and only contain letters, numbers, or underscores",
+        )
+    image_url = (body.image_url or "").strip()
+    if not image_url:
+        raise HTTPException(status_code=400, detail="image_url is required")
+
+    existing_count = (
+        db.query(db_models.DBServerEmoji)
+        .filter(db_models.DBServerEmoji.server_id == server_id)
+        .count()
+    )
+    if existing_count >= MAX_SERVER_EMOJIS:
+        raise HTTPException(status_code=400, detail=f"Server emoji limit reached ({MAX_SERVER_EMOJIS})")
+
+    duplicate = (
+        db.query(db_models.DBServerEmoji)
+        .filter(
+            db_models.DBServerEmoji.server_id == server_id,
+            func.lower(db_models.DBServerEmoji.name) == name,
+        )
+        .first()
+    )
+    if duplicate:
+        raise HTTPException(status_code=400, detail="An emoji with that name already exists on this server")
+
+    emoji = db_models.DBServerEmoji(
+        server_id=server_id,
+        name=name,
+        image_url=image_url,
+        creator_id=current_user.user_id,
+        created_at=int(time.time()),
+    )
+    db.add(emoji)
+    db.commit()
+    db.refresh(emoji)
+    return emoji
+
+
+@app.delete("/servers/{server_id}/emojis/{emoji_id}")
+def delete_server_emoji(
+    server_id: int,
+    emoji_id: int,
+    current_user: db_models.DBUser = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    server = db.query(db_models.DBServer).filter(db_models.DBServer.server_id == server_id).first()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+    ensure_server_member(server, current_user.user_id)
+    if not can_manage_server_emojis(server, current_user.user_id):
+        raise HTTPException(status_code=403, detail="Only admins can manage server emojis")
+
+    emoji = (
+        db.query(db_models.DBServerEmoji)
+        .filter(
+            db_models.DBServerEmoji.emoji_id == emoji_id,
+            db_models.DBServerEmoji.server_id == server_id,
+        )
+        .first()
+    )
+    if not emoji:
+        raise HTTPException(status_code=404, detail="Emoji not found")
+
+    image_url = emoji.image_url
+    db.delete(emoji)
+    db.commit()
+    try:
+        storage.delete_file(image_url)
+    except Exception:
+        pass
+    return {"status": "success"}
+
 
 @app.post("/servers/{server_id}/members/{user_id}/kick")
 def kick_server_member(server_id: int, user_id: int, current_user: db_models.DBUser = Depends(get_current_user), db: Session = Depends(get_db)):
@@ -2349,12 +2482,25 @@ async def custom_http_exception_handler(request, exc):
     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
 
 MAX_UPLOAD_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_EMOJI_UPLOAD_SIZE = 256 * 1024  # 256KB for custom emojis
+ALLOWED_UPLOAD_TYPES = {"attachments", "avatars", "banners", "emojis"}
 
 @app.post("/api/upload")
 async def upload_file(file: UploadFile = File(...), upload_type: str = Form("attachments"), current_user: db_models.DBUser = Depends(get_current_user)):
+    folder = (upload_type or "attachments").strip().lower()
+    if folder not in ALLOWED_UPLOAD_TYPES:
+        raise HTTPException(status_code=400, detail="Invalid upload_type")
+
     file_bytes = await file.read()
-    if len(file_bytes) > MAX_UPLOAD_SIZE:
-        raise HTTPException(status_code=413, detail="File exceeds 10MB limit")
+    max_size = MAX_EMOJI_UPLOAD_SIZE if folder == "emojis" else MAX_UPLOAD_SIZE
+    if len(file_bytes) > max_size:
+        limit_label = "256KB" if folder == "emojis" else "10MB"
+        raise HTTPException(status_code=413, detail=f"File exceeds {limit_label} limit")
+
+    if folder == "emojis":
+        content_type = (file.content_type or "").lower()
+        if not content_type.startswith("image/"):
+            raise HTTPException(status_code=400, detail="Custom emojis must be image files")
 
     import uuid, re
     original_name = getattr(file, "filename", "attachment")
@@ -2363,7 +2509,7 @@ async def upload_file(file: UploadFile = File(...), upload_type: str = Form("att
     safe_name = re.sub(r'[^a-zA-Z0-9_\-\.]', '_', original_name)
     unique_filename = f"{uuid.uuid4().hex}_{safe_name}"
     
-    url = storage.upload_file_bytes(file_bytes, unique_filename, file.content_type, folder=upload_type)
+    url = storage.upload_file_bytes(file_bytes, unique_filename, file.content_type, folder=folder)
     return {"url": url}
 
 if os.path.exists(_UPLOADS_DIR):
