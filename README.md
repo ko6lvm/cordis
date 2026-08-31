@@ -1,19 +1,16 @@
 # cordis
-The next generation of Cordis.
-
-## Setup
-```bash
-sudo bash init-postgresql.sh
-sudo bash start.sh
-```
+Cordis is an online messaging platform that runs on Python and FastAPI.
 
 ## Usage
 ```bash
 sudo bash start.sh
 ```
+### Setup
+```bash
+sudo bash init-postgresql.sh
+```
 
-## Maintainers
-Maintained by the KSF Cybersecurity Initative, a project of LVMLabs, by the following contributors:  
+## Contributors
 `@ko6lvm`  
 `@inkboym`  
 `@eicv-dev`  
