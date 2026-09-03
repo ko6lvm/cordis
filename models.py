@@ -180,6 +180,23 @@ class CategoryResponse(BaseModel):
         from_attributes = True
 
 
+class ServerEmojiCreate(BaseModel):
+    name: str
+    image_url: str
+
+
+class ServerEmojiResponse(BaseModel):
+    emoji_id: int
+    server_id: int
+    name: str
+    image_url: str
+    creator_id: int
+    created_at: int
+
+    class Config:
+        from_attributes = True
+
+
 # ==========================================
 # 4. CHANNEL SCHEMAS
 # ==========================================

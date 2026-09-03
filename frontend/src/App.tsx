@@ -3,7 +3,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { Compass, Plus, Hash, LogOut, Send, Loader2, Settings, Users, Home, MessageSquare, Check, X, AlertTriangle, Pencil, Trash2, Reply, File as FileIcon, UploadCloud, Download, Hammer, Play, Pause, Smile, Pin, Sun, Moon, ChevronDown, ChevronRight, FolderPlus, Shield, Menu, BadgeCheck, Clock, Copy, Link2 } from 'lucide-react';
 import { useDropzone } from 'react-dropzone';
-import EmojiPicker, { Theme } from 'emoji-picker-react';
+import EmojiPicker, { Theme, Categories } from 'emoji-picker-react';
+import type { EmojiClickData } from 'emoji-picker-react';
 import ImageCropModal from './components/ImageCropModal';
 
 const API_BASE = import.meta.env.VITE_API_BASE || (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' ? "http://127.0.0.1:8000" : "");
@@ -87,6 +88,55 @@ const getFullUrl = (url: string | undefined | null) => {
   return url;
 };
 
+type ServerEmoji = {
+  emoji_id: number;
+  server_id: number;
+  name: string;
+  image_url: string;
+  creator_id: number;
+  created_at: number;
+};
+
+const formatCustomReaction = (emoji: { name: string; emoji_id: number }) =>
+  `<:${emoji.name}:${emoji.emoji_id}>`;
+
+const parseCustomReaction = (token: string): { name: string; id: number } | null => {
+  const m = token.match(/^<:([a-zA-Z0-9_]+):(\d+)>$/);
+  if (!m) return null;
+  return { name: m[1], id: parseInt(m[2], 10) };
+};
+
+const findCustomEmoji = (
+  emojis: ServerEmoji[],
+  tokenOrName: string
+): ServerEmoji | undefined => {
+  const parsed = parseCustomReaction(tokenOrName);
+  if (parsed) {
+    return (
+      emojis.find((e) => e.emoji_id === parsed.id) ||
+      emojis.find((e) => e.name.toLowerCase() === parsed.name.toLowerCase())
+    );
+  }
+  const name = tokenOrName.replace(/^:|:$/g, '').toLowerCase();
+  return emojis.find((e) => e.name.toLowerCase() === name);
+};
+
+const renderReactionEmoji = (token: string, customEmojis: ServerEmoji[]) => {
+  const custom = findCustomEmoji(customEmojis, token);
+  if (custom) {
+    return (
+      <img
+        src={getFullUrl(custom.image_url)}
+        alt={`:${custom.name}:`}
+        title={`:${custom.name}:`}
+        className="custom-emoji reaction"
+        draggable={false}
+      />
+    );
+  }
+  return <span className="reaction-emoji">{token}</span>;
+};
+
 type CropTarget = 'userAvatar' | 'userBanner' | 'serverIcon' | 'serverBanner';
 
 const CROP_CONFIG: Record<CropTarget, { aspect: number; cropShape: 'round' | 'rect'; outputWidth: number; outputHeight: number; title: string }> = {
@@ -125,18 +175,57 @@ const formatLastActive = (lastActiveAt: number | undefined, isOnline: boolean) =
   return `Active ${relative} (${absolute})`;
 };
 
-const renderMessageText = (text: string | undefined, onMentionClick?: (username: string, e: React.MouseEvent) => void) => {
+const renderMessageText = (
+  text: string | undefined,
+  onMentionClick?: (username: string, e: React.MouseEvent) => void,
+  customEmojis: ServerEmoji[] = []
+) => {
   if (!text) return null;
-  
-  // Pre-process text for mentions: turn @username into [@username](https://mention.local/username)
-  // We use a simple regex that only matches if not preceded by word characters
-  const processedText = text.replace(/(^|\s)@(\w+)/g, '$1[@$2](https://mention.local/$2)');
+
+  let processedText = text.replace(/(^|\s)@(\w+)/g, '$1[@$2](https://mention.local/$2)');
+
+  processedText = processedText.replace(/<:([a-zA-Z0-9_]+):(\d+)>/g, (_m, name, id) => {
+    const found =
+      customEmojis.find((e) => e.emoji_id === Number(id)) ||
+      customEmojis.find((e) => e.name.toLowerCase() === String(name).toLowerCase());
+    if (found) {
+      return `![custom-emoji:${found.name}](${getFullUrl(found.image_url)})`;
+    }
+    return `:${name}:`;
+  });
+
+  if (customEmojis.length > 0) {
+    const byName = new Map(customEmojis.map((e) => [e.name.toLowerCase(), e]));
+    processedText = processedText.replace(
+      /(^|[^a-zA-Z0-9_]):([a-zA-Z0-9_]{2,32}):(?![a-zA-Z0-9_])/g,
+      (full, prefix, name) => {
+        const found = byName.get(String(name).toLowerCase());
+        if (!found) return full;
+        return `${prefix}![custom-emoji:${found.name}](${getFullUrl(found.image_url)})`;
+      }
+    );
+  }
 
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
       components={{
         p: ({ node, ...props }) => <p style={{ margin: 0, padding: 0 }} {...props} />,
+        img: ({ node, src, alt, ...props }) => {
+          if (typeof alt === 'string' && alt.startsWith('custom-emoji:')) {
+            const name = alt.replace('custom-emoji:', '');
+            return (
+              <img
+                src={src}
+                alt={`:${name}:`}
+                title={`:${name}:`}
+                className="custom-emoji inline"
+                draggable={false}
+              />
+            );
+          }
+          return <img src={src} alt={alt} {...props} />;
+        },
         a: ({ node, href, children, ...props }) => {
           if (href?.startsWith('https://mention.local/')) {
             const username = href.replace('https://mention.local/', '');
@@ -582,6 +671,15 @@ function App() {
   const [serverBannerFile, setServerBannerFile] = useState<File | null>(null);
   const [isDeletingServer, setIsDeletingServer] = useState(false);
   const [isLeavingServer, setIsLeavingServer] = useState(false);
+  const [serverEmojis, setServerEmojis] = useState<ServerEmoji[]>([]);
+  const [newEmojiName, setNewEmojiName] = useState('');
+  const [newEmojiFile, setNewEmojiFile] = useState<File | null>(null);
+  const [newEmojiPreview, setNewEmojiPreview] = useState('');
+  const [isUploadingEmoji, setIsUploadingEmoji] = useState(false);
+  const [emojiSettingsError, setEmojiSettingsError] = useState('');
+  const [showEmojiSuggestions, setShowEmojiSuggestions] = useState(false);
+  const [emojiFilter, setEmojiFilter] = useState('');
+  const [emojiTriggerIndex, setEmojiTriggerIndex] = useState(-1);
 
   // Invite code joining
   const [joinInviteCode, setJoinInviteCode] = useState('');
@@ -1028,6 +1126,22 @@ function App() {
     return chanList;
   };
 
+  const loadServerEmojis = async (serverId: number) => {
+    try {
+      const res = await fetch(`${API_BASE}/servers/${serverId}/emojis`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        setServerEmojis(await res.json());
+      } else {
+        setServerEmojis([]);
+      }
+    } catch (e) {
+      console.error('Failed to load server emojis', e);
+      setServerEmojis([]);
+    }
+  };
+
   const navigateToChannel = async (serverId: number | null | undefined, channelId: number) => {
     if (serverId === null || serverId === undefined) {
       setIsViewingDMs(true);
@@ -1056,6 +1170,7 @@ function App() {
         setIsViewingDMs(false);
         setActiveServer(server);
         fetchServerMembersAndPresence(serverId);
+        loadServerEmojis(serverId);
         setIsLoadingChannels(true);
         try {
           const chanList = await loadServerChannelsAndCategories(serverId);
@@ -1084,11 +1199,13 @@ function App() {
     setActiveChannel(null);
     setMessages([]);
     setCategories([]);
+    setServerEmojis([]);
     if (ws) { ws.close(); setWs(null); }
     if (isMobile) setMobileNavOpen(true);
     setMobileMembersOpen(false);
     
     fetchServerMembersAndPresence(server.server_id);
+    loadServerEmojis(server.server_id);
     
     setIsLoadingChannels(true);
     try {
@@ -1756,6 +1873,27 @@ function App() {
     }, 10);
   };
 
+  const getEmojiSuggestions = () => {
+    if (!serverEmojis.length) return [];
+    const q = emojiFilter.toLowerCase();
+    if (!q) return serverEmojis.slice(0, 12);
+    return serverEmojis.filter((e) => e.name.toLowerCase().includes(q)).slice(0, 12);
+  };
+
+  const insertEmojiShortcode = (name: string) => {
+    if (emojiTriggerIndex === -1) return;
+    const before = chatInput.slice(0, emojiTriggerIndex);
+    const after = chatInput.slice(emojiTriggerIndex + 1 + emojiFilter.length);
+    const newText = `${before}:${name}:${after.startsWith(' ') ? after : ` ${after}`}`;
+    setChatInput(newText);
+    setShowEmojiSuggestions(false);
+    setEmojiTriggerIndex(-1);
+    setEmojiFilter('');
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 10);
+  };
+
   const startEditingLastOwnMessage = () => {
     if (!user) return false;
     const lastOwn = [...messages].reverse().find(
@@ -1792,6 +1930,29 @@ function App() {
         } else if (e.key === 'Escape') {
           e.preventDefault();
           setShowMentions(false);
+          return;
+        }
+      }
+    }
+
+    if (showEmojiSuggestions) {
+      const suggestions = getEmojiSuggestions();
+      if (suggestions.length > 0) {
+        if (e.key === 'ArrowDown') {
+          e.preventDefault();
+          setActiveSuggestionIndex((prev) => (prev + 1) % suggestions.length);
+          return;
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault();
+          setActiveSuggestionIndex((prev) => (prev - 1 + suggestions.length) % suggestions.length);
+          return;
+        } else if (e.key === 'Enter' || e.key === 'Tab') {
+          e.preventDefault();
+          insertEmojiShortcode(suggestions[activeSuggestionIndex].name);
+          return;
+        } else if (e.key === 'Escape') {
+          e.preventDefault();
+          setShowEmojiSuggestions(false);
           return;
         }
       }
@@ -1843,8 +2004,18 @@ function App() {
       setMentionFilter(mentionMatch[1]);
       setMentionTriggerIndex(selectionStart - mentionMatch[0].length);
       setActiveSuggestionIndex(0);
+      setShowEmojiSuggestions(false);
     } else {
       setShowMentions(false);
+      const emojiMatch = textBeforeCursor.match(/(^|[^a-zA-Z0-9_:/]):([a-zA-Z0-9_]{0,32})$/);
+      if (emojiMatch && serverEmojis.length > 0 && !textBeforeCursor.endsWith('://')) {
+        setShowEmojiSuggestions(true);
+        setEmojiFilter(emojiMatch[2]);
+        setEmojiTriggerIndex(selectionStart - emojiMatch[2].length - 1);
+        setActiveSuggestionIndex(0);
+      } else {
+        setShowEmojiSuggestions(false);
+      }
     }
   };
 
@@ -2132,6 +2303,7 @@ function App() {
     if (activeServer) {
       if (serverImage.startsWith('blob:')) URL.revokeObjectURL(serverImage);
       if (serverBanner.startsWith('blob:')) URL.revokeObjectURL(serverBanner);
+      if (newEmojiPreview.startsWith('blob:')) URL.revokeObjectURL(newEmojiPreview);
       setServerName(activeServer.server_name);
       setServerDescription(activeServer.server_description || '');
       setServerImage(activeServer.server_image || '');
@@ -2140,6 +2312,11 @@ function App() {
         if (!rawRoles[k].id) rawRoles[k].id = k;
       }
       setServerRolesSettings(rawRoles);
+      setNewEmojiName('');
+      setNewEmojiFile(null);
+      setNewEmojiPreview('');
+      setEmojiSettingsError('');
+      loadServerEmojis(activeServer.server_id);
       setShowServerSettings(true);
       if (isMobile) setMobileNavOpen(false);
     }
@@ -2148,7 +2325,106 @@ function App() {
   const closeServerSettings = () => {
     if (serverImage.startsWith('blob:')) URL.revokeObjectURL(serverImage);
     if (serverBanner.startsWith('blob:')) URL.revokeObjectURL(serverBanner);
+    if (newEmojiPreview.startsWith('blob:')) URL.revokeObjectURL(newEmojiPreview);
+    setNewEmojiName('');
+    setNewEmojiFile(null);
+    setNewEmojiPreview('');
+    setEmojiSettingsError('');
     setShowServerSettings(false);
+  };
+
+  const handleNewEmojiFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = '';
+    if (!file) return;
+    if (!file.type.startsWith('image/')) {
+      setEmojiSettingsError('Emoji must be an image file (PNG, JPG, GIF, WebP).');
+      return;
+    }
+    if (file.size > 256 * 1024) {
+      setEmojiSettingsError('Emoji image must be 256KB or smaller.');
+      return;
+    }
+    if (newEmojiPreview.startsWith('blob:')) URL.revokeObjectURL(newEmojiPreview);
+    setNewEmojiFile(file);
+    setNewEmojiPreview(URL.createObjectURL(file));
+    setEmojiSettingsError('');
+  };
+
+  const addServerEmoji = async () => {
+    if (!activeServer || !token) return;
+    const name = newEmojiName.trim().toLowerCase();
+    if (!/^[a-z0-9_]{2,32}$/.test(name)) {
+      setEmojiSettingsError('Name must be 2–32 characters: letters, numbers, underscores.');
+      return;
+    }
+    if (!newEmojiFile) {
+      setEmojiSettingsError('Choose an image for the emoji.');
+      return;
+    }
+    setIsUploadingEmoji(true);
+    setEmojiSettingsError('');
+    try {
+      const formData = new FormData();
+      formData.append('file', newEmojiFile);
+      formData.append('upload_type', 'emojis');
+      const uploadRes = await fetch(`${API_BASE}/api/upload`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      if (!uploadRes.ok) {
+        const err = await uploadRes.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to upload emoji image');
+      }
+      const { url } = await uploadRes.json();
+      const res = await fetch(`${API_BASE}/servers/${activeServer.server_id}/emojis`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ name, image_url: url }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'Failed to create emoji');
+      }
+      const created: ServerEmoji = await res.json();
+      setServerEmojis((prev) =>
+        [...prev.filter((e) => e.emoji_id !== created.emoji_id), created].sort((a, b) =>
+          a.name.localeCompare(b.name)
+        )
+      );
+      if (newEmojiPreview.startsWith('blob:')) URL.revokeObjectURL(newEmojiPreview);
+      setNewEmojiName('');
+      setNewEmojiFile(null);
+      setNewEmojiPreview('');
+    } catch (e: any) {
+      setEmojiSettingsError(e?.message || 'Failed to add emoji');
+    } finally {
+      setIsUploadingEmoji(false);
+    }
+  };
+
+  const deleteServerEmoji = async (emojiId: number) => {
+    if (!activeServer || !token) return;
+    if (!window.confirm('Delete this custom emoji?')) return;
+    try {
+      const res = await fetch(`${API_BASE}/servers/${activeServer.server_id}/emojis/${emojiId}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        alert(err.detail || 'Failed to delete emoji');
+        return;
+      }
+      setServerEmojis((prev) => prev.filter((e) => e.emoji_id !== emojiId));
+    } catch (e) {
+      console.error(e);
+      alert('Failed to delete emoji');
+    }
   };
 
   const openCropModalForFile = (e: React.ChangeEvent<HTMLInputElement>, target: CropTarget) => {
@@ -3101,7 +3377,7 @@ function App() {
 
       {/* Server Sidebar */}
       <div className="panel server-sidebar">
-        <div className={`server-icon ${isViewingDMs ? 'active' : ''}`} onClick={() => { setIsViewingDMs(true); setActiveServer(null); setActiveChannel(null); setMessages([]); if (isMobile) setMobileNavOpen(true); setMobileMembersOpen(false); }} data-tooltip="Direct Messages">
+        <div className={`server-icon ${isViewingDMs ? 'active' : ''}`} onClick={() => { setIsViewingDMs(true); setActiveServer(null); setActiveChannel(null); setMessages([]); setServerEmojis([]); if (isMobile) setMobileNavOpen(true); setMobileMembersOpen(false); }} data-tooltip="Direct Messages">
           {isViewingDMs && <div className="active-pill" />}
           {!isViewingDMs && serverUnreadStatus[0] && !serverMentionCount[0] && <div className="unread-dot" />}
           <Home size={24} color={isViewingDMs ? '#fff' : 'var(--text-main)'} />
@@ -3563,7 +3839,7 @@ function App() {
                   revealedMessages[m.message_id] ? (
                     <div className="msg-text revealed-message" style={{opacity: 0.8, borderLeft: '2px solid var(--brand-primary)', paddingLeft: '8px'}}>
                       <div style={{fontSize: '11px', color: 'var(--brand-primary)', fontWeight: 'bold', marginBottom: '4px'}}>Revealed Deleted Message:</div>
-                      {renderMessageText(revealedMessages[m.message_id].content?.text)}
+                      {renderMessageText(revealedMessages[m.message_id].content?.text, undefined, serverEmojis)}
                       {revealedMessages[m.message_id].content?.attachments && revealedMessages[m.message_id].content.attachments.map((url: string, idx: number) => (
                         <MessageAttachment key={idx} url={url} onLoad={scrollToBottom} />
                       ))}
@@ -3619,7 +3895,7 @@ function App() {
                             matchedUser = { username, user_id: 0 };
                           }
                           setSelectedProfile({ user: matchedUser, rect: e.currentTarget.getBoundingClientRect() });
-                        })}
+                        }, serverEmojis)}
                       </div>
                       {m.content.attachments && m.content.attachments.map((url: string, idx: number) => (
                         <MessageAttachment key={idx} url={url} onLoad={scrollToBottom} />
@@ -3657,7 +3933,7 @@ function App() {
 
                       return (
                         <button key={rIdx} className={`reaction-pill ${hasReacted ? 'active' : ''}`} onClick={() => handleReactionToggle(m.message_id, r.emoji)}>
-                          <span className="reaction-emoji">{r.emoji}</span>
+                          {renderReactionEmoji(r.emoji, serverEmojis)}
                           <span className="reaction-count">{r.count}</span>
                           <div className="reaction-tooltip">{tooltipText}</div>
                         </button>
@@ -3686,7 +3962,39 @@ function App() {
                   )}
                   {showFullEmojiPicker === m.message_id && (
                     <div style={{position: 'absolute', bottom: '100%', right: '0', zIndex: 50, marginBottom: '8px'}}>
-                      <EmojiPicker onEmojiClick={(e) => handleReactionToggle(m.message_id, e.emoji)} theme={theme === 'light' ? Theme.LIGHT : Theme.DARK} />
+                      <EmojiPicker
+                        onEmojiClick={(emojiData: EmojiClickData) => {
+                          if (emojiData.isCustom) {
+                            const id = parseInt(emojiData.unified, 10);
+                            const found =
+                              serverEmojis.find((em) => em.emoji_id === id) ||
+                              serverEmojis.find((em) => em.name === emojiData.names[0]);
+                            if (found) {
+                              handleReactionToggle(m.message_id, formatCustomReaction(found));
+                              return;
+                            }
+                          }
+                          handleReactionToggle(m.message_id, emojiData.emoji);
+                        }}
+                        theme={theme === 'light' ? Theme.LIGHT : Theme.DARK}
+                        customEmojis={serverEmojis.map((em) => ({
+                          id: String(em.emoji_id),
+                          names: [em.name],
+                          imgUrl: getFullUrl(em.image_url),
+                        }))}
+                        categories={[
+                          { category: Categories.SUGGESTED, name: 'Frequently Used' },
+                          { category: Categories.CUSTOM, name: 'Server' },
+                          { category: Categories.SMILEYS_PEOPLE, name: 'Smileys & People' },
+                          { category: Categories.ANIMALS_NATURE, name: 'Animals & Nature' },
+                          { category: Categories.FOOD_DRINK, name: 'Food & Drink' },
+                          { category: Categories.TRAVEL_PLACES, name: 'Travel & Places' },
+                          { category: Categories.ACTIVITIES, name: 'Activities' },
+                          { category: Categories.OBJECTS, name: 'Objects' },
+                          { category: Categories.SYMBOLS, name: 'Symbols' },
+                          { category: Categories.FLAGS, name: 'Flags' },
+                        ]}
+                      />
                     </div>
                   )}
                   <button className="icon-btn action-btn" onClick={() => setReplyingTo(m)} title="Reply">
@@ -3709,7 +4017,7 @@ function App() {
               )}
               </div>
             </div>
-          )}), [messages, activeServer?.server_id, activeMessageId, isMobile, revealedMessages, editingMessageId, editContent, isMuted, serverMembers, dms, showEmojiPicker, showFullEmojiPicker, theme])}
+          )}), [messages, activeServer?.server_id, activeMessageId, isMobile, revealedMessages, editingMessageId, editContent, isMuted, serverMembers, dms, showEmojiPicker, showFullEmojiPicker, theme, serverEmojis])}
           <div ref={messagesEndRef} />
         </div>
 
@@ -3736,6 +4044,25 @@ function App() {
                     {getAvatarContent(u)}
                   </div>
                   <span title={`@${u.username}`}>{u.display_name || u.username}</span>
+                </div>
+              ))}
+            </div>
+          )}
+          {!showMentions && showEmojiSuggestions && getEmojiSuggestions().length > 0 && (
+            <div className="mention-suggestions-popup">
+              {getEmojiSuggestions().map((em, index) => (
+                <div
+                  key={em.emoji_id}
+                  className={`mention-suggestion-item ${index === activeSuggestionIndex ? 'active' : ''}`}
+                  onClick={() => insertEmojiShortcode(em.name)}
+                >
+                  <img
+                    src={getFullUrl(em.image_url)}
+                    alt={`:${em.name}:`}
+                    className="custom-emoji suggestion"
+                    draggable={false}
+                  />
+                  <span title={`:${em.name}:`}>:{em.name}:</span>
                 </div>
               ))}
             </div>
@@ -4665,6 +4992,122 @@ function App() {
                     {Object.keys(serverRolesSettings).length === 0 && (
                       <div style={{ fontSize: '13px', color: 'var(--text-muted)', textAlign: 'center', padding: '16px 0' }}>
                         No custom roles. Server uses default roles.
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div style={{width: '100%', marginTop: '24px', borderTop: '1px solid var(--border-subtle)', paddingTop: '24px'}}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                    <label style={{fontSize: '12px', fontWeight: 600, color: 'var(--text-muted)', textTransform: 'uppercase', margin: 0}}>
+                      Custom Emojis ({serverEmojis.length}/50)
+                    </label>
+                  </div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '12px' }}>
+                    Members can use these with <code style={{ color: 'var(--text-primary)' }}>:name:</code> in chat or as reactions.
+                  </div>
+
+                  {isServerAdmin ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '16px', backgroundColor: 'var(--bg-secondary)', padding: '12px', borderRadius: '8px' }}>
+                      <div style={{ display: 'flex', gap: '10px', alignItems: 'center' }}>
+                        <label
+                          style={{
+                            width: '48px',
+                            height: '48px',
+                            borderRadius: '8px',
+                            background: 'var(--bg-primary)',
+                            border: '1px dashed var(--border-subtle)',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            cursor: 'pointer',
+                            overflow: 'hidden',
+                            flexShrink: 0,
+                          }}
+                          title="Upload emoji image"
+                        >
+                          {newEmojiPreview ? (
+                            <img src={newEmojiPreview} alt="preview" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+                          ) : (
+                            <Plus size={18} style={{ color: 'var(--text-muted)' }} />
+                          )}
+                          <input type="file" accept="image/png,image/jpeg,image/gif,image/webp" style={{ display: 'none' }} onChange={handleNewEmojiFileChange} />
+                        </label>
+                        <input
+                          className="input"
+                          value={newEmojiName}
+                          onChange={(e) => setNewEmojiName(e.target.value.replace(/[^a-zA-Z0-9_]/g, '').slice(0, 32))}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter') {
+                              e.preventDefault();
+                              if (!isUploadingEmoji && newEmojiFile && newEmojiName.trim()) addServerEmoji();
+                            }
+                          }}
+                          placeholder="emoji_name"
+                          disabled={isUploadingEmoji}
+                          style={{ flex: 1 }}
+                        />
+                        <button
+                          type="button"
+                          className="btn"
+                          style={{ minWidth: '90px' }}
+                          onClick={addServerEmoji}
+                          disabled={isUploadingEmoji || !newEmojiFile || !newEmojiName.trim()}
+                        >
+                          {isUploadingEmoji ? <Loader2 size={16} className="spinner" /> : 'Add'}
+                        </button>
+                      </div>
+                      <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>
+                        PNG/GIF/WebP/JPEG · max 256KB · name: 2–32 chars (a-z, 0-9, _)
+                      </div>
+                      {emojiSettingsError && <div className="error-msg" style={{ margin: 0 }}>{emojiSettingsError}</div>}
+                    </div>
+                  ) : (
+                    <div style={{ fontSize: '12px', color: 'var(--text-muted)', marginBottom: '12px' }}>
+                      Only server admins can add or remove emojis.
+                    </div>
+                  )}
+
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', maxHeight: '220px', overflowY: 'auto' }}>
+                    {serverEmojis.map((em) => (
+                      <div
+                        key={em.emoji_id}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '10px',
+                          backgroundColor: 'var(--bg-secondary)',
+                          padding: '8px 10px',
+                          borderRadius: '8px',
+                        }}
+                      >
+                        <img
+                          src={getFullUrl(em.image_url)}
+                          alt={`:${em.name}:`}
+                          className="custom-emoji"
+                          style={{ width: '32px', height: '32px' }}
+                          draggable={false}
+                        />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontWeight: 600, fontSize: '13px' }}>:{em.name}:</div>
+                          <div style={{ fontSize: '11px', color: 'var(--text-muted)' }}>ID {em.emoji_id}</div>
+                        </div>
+                        {isServerAdmin && (
+                          <button
+                            type="button"
+                            className="icon-btn"
+                            style={{ color: '#ef4444' }}
+                            onClick={() => deleteServerEmoji(em.emoji_id)}
+                            title="Delete emoji"
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        )}
+                      </div>
+                    ))}
+                    {serverEmojis.length === 0 && (
+                      <div style={{ fontSize: '13px', color: 'var(--text-muted)', textAlign: 'center', padding: '16px 0' }}>
+                        No custom emojis yet.
                       </div>
                     )}
                   </div>
